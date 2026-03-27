@@ -120,7 +120,7 @@ class MemoryNet(nn.Module):
         history_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Assemble the 112-dim input feature vector.
+        Assemble the 113-dim input feature vector.
 
         Args:
             D_prev:             (batch,) current difficulty [1, 10]

@@ -80,7 +80,7 @@ def inner_loop(
         Adapted parameters W_i (state_dict).
     """
     # Copy meta-parameters — do not modify phi in-place
-    model.load_state_dict(deepcopy(phi_state_dict))
+    model.load_state_dict(phi_state_dict, strict=True)
     model.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=inner_lr)

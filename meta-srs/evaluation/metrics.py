@@ -241,6 +241,16 @@ class MetaSRSEvaluator:
         all_S_targets = np.array(all_S_targets)
 
         # Compute metrics (guard against NaN from diverged models)
+        n_nan_preds = np.isnan(all_preds).sum()
+        n_nan_cold = np.isnan(all_preds_cold).sum()
+        n_nan_S = np.isnan(all_S_preds).sum()
+        if n_nan_preds + n_nan_cold + n_nan_S > 0:
+            import warnings
+            warnings.warn(
+                f"NaN detected in predictions: {n_nan_preds} preds, "
+                f"{n_nan_cold} cold-start preds, {n_nan_S} S predictions. "
+                f"Model may have diverged during adaptation."
+            )
         all_preds = np.nan_to_num(all_preds, nan=0.5)
         all_preds_cold = np.nan_to_num(all_preds_cold, nan=0.5)
         all_S_preds = np.nan_to_num(all_S_preds, nan=0.0)
