@@ -21,6 +21,7 @@ Phase 3 — Full personal (50+ reviews):
 
 import torch
 import torch.nn as nn
+import numpy as np
 from copy import deepcopy
 from enum import Enum, auto
 from typing import Dict, List, Optional
@@ -70,7 +71,7 @@ class FastAdapter:
         # Student's personalised parameters
         self.theta_student = deepcopy(phi_star)
         self.reviews: List[Review] = []
-        self.card_embeddings: Dict[str, any] = {}
+        self.card_embeddings: Dict[str, np.ndarray] = {}
         self._reviews_since_last_adapt = 0
 
         self.loss_fn = MetaSRSLoss(w20=self.fsrs_cfg.w[20])
@@ -136,7 +137,7 @@ class FastAdapter:
         """Run k gradient steps for adaptation."""
         # Start from phi* or current theta
         start_params = self.phi_star if from_phi else self.theta_student
-        self.model.load_state_dict(deepcopy(start_params))
+        self.model.load_state_dict(start_params)
         self.model.train()
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=inner_lr)
@@ -162,7 +163,7 @@ class FastAdapter:
         if not self.reviews:
             return
 
-        self.model.load_state_dict(deepcopy(self.theta_student))
+        self.model.load_state_dict(self.theta_student)
         self.model.train()
 
         optimizer = torch.optim.Adam(

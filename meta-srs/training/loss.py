@@ -42,7 +42,7 @@ class MetaSRSLoss(nn.Module):
         self.monotonicity_weight = monotonicity_weight
         self.w20 = w20
 
-        self.bce = nn.BCELoss()
+        self.bce = nn.BCEWithLogitsLoss()
         self.mse = nn.MSELoss()
 
     def forward(
@@ -69,16 +69,19 @@ class MetaSRSLoss(nn.Module):
             Dict with 'total', 'recall', 'stability', 'monotonicity' losses.
         """
         # PRIMARY: recall prediction (binary cross-entropy)
-        recall_L = self.bce(
-            p_recall_pred.clamp(1e-6, 1 - 1e-6),
-            recalled.float(),
-        )
+        # Convert probabilities to logits for numerical stability
+        p_clamped = p_recall_pred.clamp(1e-6, 1 - 1e-6)
+        logits = torch.log(p_clamped / (1 - p_clamped))
+        recall_L = self.bce(logits, recalled.float())
 
         # AUXILIARY 1: stability-curve consistency
         # R_from_S = (0.9^(1/S_pred))^(elapsed_days^w20)
-        R_from_S = (0.9 ** (1.0 / S_next_pred.clamp(min=1e-6))) ** (
-            elapsed_days.clamp(min=0) ** self.w20
-        )
+        # Computed in log-space for numerical stability:
+        #   log(R) = (1/S) * log(0.9) * (t^w20)
+        log_09 = -0.10536051565782628  # math.log(0.9)
+        t_pow = elapsed_days.clamp(min=1e-6) ** self.w20
+        log_R = log_09 * t_pow / S_next_pred.clamp(min=1e-3)
+        R_from_S = torch.exp(log_R.clamp(min=-20, max=0))  # R ∈ (0, 1]
         stable_L = self.mse(R_from_S, recalled.float())
 
         # AUXILIARY 2: monotonicity (S cannot decrease on successful recall)
@@ -97,6 +100,10 @@ class MetaSRSLoss(nn.Module):
             + self.stability_weight * stable_L
             + self.monotonicity_weight * mono_L
         )
+
+        # Guard against NaN (can occur from extreme S values during adaptation)
+        if torch.isnan(total):
+            total = recall_L  # Fall back to primary loss only
 
         return {
             "total": total,
@@ -133,6 +140,9 @@ def compute_loss(
         review_count=batch["review_count"],
         card_embedding_raw=batch["card_embedding_raw"],
         user_stats=batch["user_stats"],
+        history_grades=batch.get("history_grades"),
+        history_delta_ts=batch.get("history_delta_ts"),
+        history_lengths=batch.get("history_lengths"),
     )
 
     return loss_fn(

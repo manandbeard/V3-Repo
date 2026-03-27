@@ -10,7 +10,7 @@ import math
 @dataclass
 class ModelConfig:
     """MemoryNet architecture (Section 2.2)."""
-    input_dim: int = 112          # Feature vector dimension
+    input_dim: int = 113          # Feature vector dimension (4+4+1+64+8+32)
     hidden_dim: int = 128         # Hidden layer width
     card_embed_dim: int = 64      # Projected card embedding dimension
     card_raw_dim: int = 384       # Raw BERT embedding dimension (all-MiniLM-L6-v2)

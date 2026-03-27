@@ -195,7 +195,7 @@ class ReptileTrainer:
         start_iter = 0
 
         if resume_from and os.path.exists(resume_from):
-            checkpoint = torch.load(resume_from, map_location=self.device)
+            checkpoint = torch.load(resume_from, map_location=self.device, weights_only=False)
             self.phi = checkpoint["phi"]
             start_iter = checkpoint["iteration"] + 1
             print(f"Resumed from iteration {start_iter}")

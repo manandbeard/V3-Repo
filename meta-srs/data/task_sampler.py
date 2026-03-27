@@ -81,6 +81,7 @@ def reviews_to_batch(
     card_embeddings: Dict[str, np.ndarray],
     device: torch.device = torch.device("cpu"),
     card_raw_dim: int = 384,
+    history_len: int = 32,
 ) -> Dict[str, torch.Tensor]:
     """
     Convert a list of Review objects into a batched tensor dict
@@ -99,8 +100,13 @@ def reviews_to_batch(
     grade = torch.tensor([r.grade for r in reviews], dtype=torch.long)
     recalled = torch.tensor([float(r.recalled) for r in reviews], dtype=torch.float32)
 
-    # Review count per card (simple: count occurrences up to this point)
-    review_count = torch.ones(n, dtype=torch.float32)
+    # Review count per card (accumulate occurrences up to each review)
+    card_counts: Dict[str, int] = {}
+    review_count_list = []
+    for r in reviews:
+        card_counts[r.card_id] = card_counts.get(r.card_id, 0) + 1
+        review_count_list.append(float(card_counts[r.card_id]))
+    review_count = torch.tensor(review_count_list, dtype=torch.float32)
 
     # Card embeddings
     embeds = []
@@ -119,6 +125,39 @@ def reviews_to_batch(
     user_stats[:, 0] = mean_D
     user_stats[:, 1] = torch.log(mean_S.clamp(min=1e-6))
 
+    # Build per-card review history sequences for GRU encoder
+    max_hist_len = history_len
+    card_history: Dict[str, List[Tuple[float, float]]] = {}
+    history_grades_list = []
+    history_delta_ts_list = []
+    history_lengths_list = []
+
+    for r in reviews:
+        hist = card_history.get(r.card_id, [])
+        seq_len = min(len(hist), max_hist_len)
+
+        # Pad/truncate to max_hist_len
+        if seq_len == 0:
+            h_grades = [0.0] * max_hist_len
+            h_dts = [0.0] * max_hist_len
+        else:
+            recent = hist[-max_hist_len:]
+            h_grades = [g for g, _ in recent] + [0.0] * (max_hist_len - len(recent))
+            h_dts = [d for _, d in recent] + [0.0] * (max_hist_len - len(recent))
+
+        history_grades_list.append(h_grades)
+        history_delta_ts_list.append(h_dts)
+        history_lengths_list.append(max(seq_len, 1))  # clamp min=1 for pack_padded
+
+        # Append current review to history for future reviews
+        card_history.setdefault(r.card_id, []).append(
+            (float(r.grade), r.elapsed_days)
+        )
+
+    history_grades = torch.tensor(history_grades_list, dtype=torch.float32)
+    history_delta_ts = torch.tensor(history_delta_ts_list, dtype=torch.float32)
+    history_lengths = torch.tensor(history_lengths_list, dtype=torch.long)
+
     # Targets for warm-start
     S_target = torch.tensor([r.S_target for r in reviews], dtype=torch.float32)
     D_target = torch.tensor([r.D_target for r in reviews], dtype=torch.float32)
@@ -135,6 +174,9 @@ def reviews_to_batch(
         "recalled": recalled.to(device),
         "S_target": S_target.to(device),
         "D_target": D_target.to(device),
+        "history_grades": history_grades.to(device),
+        "history_delta_ts": history_delta_ts.to(device),
+        "history_lengths": history_lengths.to(device),
     }
 
     return batch

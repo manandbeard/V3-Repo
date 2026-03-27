@@ -166,7 +166,7 @@ def main():
     if args.eval_only:
         ckpt_path = args.eval_checkpoint or os.path.join(args.checkpoint_dir, "phi_star.pt")
         print(f"\n=== Evaluation Only: loading {ckpt_path} ===")
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
         phi = checkpoint["phi"]
 
         evaluator = MetaSRSEvaluator(model, config, device)

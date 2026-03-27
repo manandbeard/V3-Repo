@@ -180,6 +180,9 @@ class MetaSRSEvaluator:
                     review_count=query_batch["review_count"],
                     card_embedding_raw=query_batch["card_embedding_raw"],
                     user_stats=query_batch["user_stats"],
+                    history_grades=query_batch.get("history_grades"),
+                    history_delta_ts=query_batch.get("history_delta_ts"),
+                    history_lengths=query_batch.get("history_lengths"),
                 )
 
             preds_cold = state_cold.p_recall.cpu().numpy()
@@ -212,6 +215,9 @@ class MetaSRSEvaluator:
                     review_count=query_batch["review_count"],
                     card_embedding_raw=query_batch["card_embedding_raw"],
                     user_stats=query_batch["user_stats"],
+                    history_grades=query_batch.get("history_grades"),
+                    history_delta_ts=query_batch.get("history_delta_ts"),
+                    history_lengths=query_batch.get("history_lengths"),
                 )
 
             preds = state.p_recall.cpu().numpy()
@@ -234,7 +240,11 @@ class MetaSRSEvaluator:
         all_S_preds = np.array(all_S_preds)
         all_S_targets = np.array(all_S_targets)
 
-        # Compute metrics
+        # Compute metrics (guard against NaN from diverged models)
+        all_preds = np.nan_to_num(all_preds, nan=0.5)
+        all_preds_cold = np.nan_to_num(all_preds_cold, nan=0.5)
+        all_S_preds = np.nan_to_num(all_S_preds, nan=0.0)
+
         results = EvalResults(
             auc_roc=self.compute_auc_roc(all_preds, all_labels),
             calibration_error=np.mean(calibration_errors) if calibration_errors else 0.0,
@@ -310,6 +320,9 @@ class MetaSRSEvaluator:
                         review_count=query_batch["review_count"],
                         card_embedding_raw=query_batch["card_embedding_raw"],
                         user_stats=query_batch["user_stats"],
+                        history_grades=query_batch.get("history_grades"),
+                        history_delta_ts=query_batch.get("history_delta_ts"),
+                        history_lengths=query_batch.get("history_lengths"),
                     )
 
                 all_preds.extend(state.p_recall.cpu().numpy())
