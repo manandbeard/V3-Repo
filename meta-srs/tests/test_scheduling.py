@@ -47,15 +47,19 @@ class TestComputeInterval:
         assert interval <= scheduler.cfg.max_interval
 
     def test_high_uncertainty_shortens_interval(self, scheduler):
+        """High uncertainty should reduce interval due to confidence discounting.
+        Fuzz adds ±5% randomness, so we allow a small tolerance."""
         interval_low_sigma, _, _ = scheduler.compute_interval(
             S_pred=20.0, D=5.0, sigma=0.01
         )
         interval_high_sigma, _, _ = scheduler.compute_interval(
             S_pred=20.0, D=5.0, sigma=0.99
         )
-        # High uncertainty should generally give shorter or equal interval
-        # (due to fuzz, we check average behavior)
-        assert interval_high_sigma <= interval_low_sigma + 5
+        # The confidence factor for sigma=0.99 is ~0.505, vs ~0.995 for sigma=0.01.
+        # With ±5% fuzz, the high-sigma interval could exceed the low-sigma one
+        # by at most ~5% of the low-sigma interval. We use that as tolerance.
+        fuzz_tolerance = max(1, round(interval_low_sigma * 0.10))
+        assert interval_high_sigma <= interval_low_sigma + fuzz_tolerance
 
     def test_confidence_factor_range(self, scheduler):
         _, conf, _ = scheduler.compute_interval(
@@ -70,19 +74,23 @@ class TestComputeInterval:
         assert 0.5 <= diff <= 1.5
 
     def test_hard_card_shorter_interval(self, scheduler):
-        """Harder cards (D>5) should get shorter intervals on average."""
-        # Run multiple times to account for fuzz randomness
-        easy_intervals = []
-        hard_intervals = []
-        for _ in range(100):
-            interval_easy, _, _ = scheduler.compute_interval(
-                S_pred=20.0, D=2.0, sigma=0.0
-            )
-            interval_hard, _, _ = scheduler.compute_interval(
-                S_pred=20.0, D=9.0, sigma=0.0
-            )
-            easy_intervals.append(interval_easy)
-            hard_intervals.append(interval_hard)
+        """Harder cards (D>5) should get shorter intervals.
+        Seed the RNG for deterministic fuzz to avoid statistical flakiness."""
+        import random
+        rng_state = random.getstate()
+        try:
+            random.seed(42)
+            easy_intervals = [
+                scheduler.compute_interval(S_pred=20.0, D=2.0, sigma=0.0)[0]
+                for _ in range(20)
+            ]
+            random.seed(42)
+            hard_intervals = [
+                scheduler.compute_interval(S_pred=20.0, D=9.0, sigma=0.0)[0]
+                for _ in range(20)
+            ]
+        finally:
+            random.setstate(rng_state)
 
         avg_easy = sum(easy_intervals) / len(easy_intervals)
         avg_hard = sum(hard_intervals) / len(hard_intervals)

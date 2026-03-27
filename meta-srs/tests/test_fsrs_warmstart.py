@@ -13,12 +13,8 @@ from training.fsrs_warmstart import FSRS6
 
 class TestFSRS6Retrievability:
     def test_zero_elapsed(self, fsrs):
-        """At t=0, retrievability should be 1.0."""
-        # Note: the code returns 0 for t=0 via the power-law formula
-        # but in step(), elapsed=0 overrides to R=1.0
+        """At t=0, retrievability should be 1.0 (no time to forget)."""
         R = fsrs.retrievability(0.0, 10.0)
-        # (0.9^(1/10))^(0^0.4665) = (0.9^0.1)^0 = ... 0^w20 = 0 when t=0
-        # actually 0^w20 = 0, so R = base^0 = 1.0
         assert abs(R - 1.0) < 1e-6
 
     def test_retrievability_decays(self, fsrs):
