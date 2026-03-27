@@ -5,7 +5,8 @@ Tests for Reptile meta-training utilities (training/reptile.py):
   - reptile_update
 """
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest

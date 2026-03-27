@@ -3,7 +3,8 @@ Tests for data layer: Review, Task, reviews_to_batch, TaskSampler,
 and ReviewDataset.generate_synthetic (data/task_sampler.py).
 """
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import io

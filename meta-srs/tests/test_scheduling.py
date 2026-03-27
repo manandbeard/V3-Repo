@@ -2,7 +2,8 @@
 Tests for the uncertainty-aware Scheduler (inference/scheduling.py).
 """
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import random

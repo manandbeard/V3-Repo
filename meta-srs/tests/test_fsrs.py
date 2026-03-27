@@ -2,7 +2,8 @@
 Tests for the FSRS-6 baseline model (training/fsrs_warmstart.py).
 """
 
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import math
