@@ -29,8 +29,7 @@ meta-srs/
 ├── models/
 │   ├── __init__.py
 │   ├── memory_net.py            # MemoryNet — main neural DSR model
-│   ├── gru_encoder.py           # GRU-based review history encoder
-│   └── card_embeddings.py       # BERT embedding projector
+│   └── gru_encoder.py           # GRU-based review history encoder
 ├── training/
 │   ├── __init__.py
 │   ├── reptile.py               # Reptile outer/inner loop implementation
@@ -63,7 +62,6 @@ meta-srs/
 ```
 torch>=2.0
 numpy>=1.24
-sentence-transformers>=2.2
 scikit-learn>=1.3
 tqdm
 tensorboard
@@ -80,10 +78,8 @@ Create four `@dataclass` configuration classes, all composed into a single `Meta
 ### ModelConfig — Neural Architecture
 | Parameter | Type | Default | Purpose |
 |-----------|------|---------|---------|
-| `input_dim` | int | 113 | Total feature vector dimension: 4 scalars + 4 grade one-hot + 1 count + 64 card embed + 8 user stats + 32 GRU context = 113 (the model should dynamically pad if the assembled feature vector is slightly different) |
+| `input_dim` | int | 49 | Total feature vector dimension: 4 scalars + 4 grade one-hot + 1 count + 8 user stats + 32 GRU context = 49 (the model should dynamically pad if the assembled feature vector is slightly different) |
 | `hidden_dim` | int | 128 | Width of hidden layers h1 and h2 |
-| `card_embed_dim` | int | 64 | Projected BERT card embedding dimension |
-| `card_raw_dim` | int | 384 | Raw BERT dimension (all-MiniLM-L6-v2 output) |
 | `gru_hidden_dim` | int | 32 | GRU hidden state dimension |
 | `history_len` | int | 32 | Max number of past reviews per card for GRU |
 | `user_stats_dim` | int | 8 | User-level aggregate statistics dimension |
@@ -166,11 +162,11 @@ class MetaSRSConfig:
 
 ### 3.1 MemoryNet (`models/memory_net.py`)
 
-Build a feedforward neural network that takes a 113-dimensional feature vector (the model should handle slight dimension mismatches via dynamic padding) and outputs three memory-state predictions.
+Build a feedforward neural network that takes a 49-dimensional feature vector (the model should handle slight dimension mismatches via dynamic padding) and outputs three memory-state predictions.
 
 **Architecture**:
 ```
-Input: (batch, input_dim)   # ~113 features
+Input: (batch, input_dim)   # ~49 features
 
 h1 = Linear(input_dim, 128) → LayerNorm(128) → GELU → Dropout(0.1)
 h2 = Linear(128, 128)       → LayerNorm(128) → GELU → Dropout(0.1)
@@ -199,10 +195,9 @@ Output heads (all from h3):
 | delta_t (elapsed days) | 1 | log(delta_t + 1) to handle t=0 |
 | Grade | 4 | One-hot encoding: [Again=1, Hard=2, Good=3, Easy=4] |
 | Review count | 1 | log(count) |
-| Card embedding (projected) | 64 | L2-normalized after projection |
 | User stats | 8 | Mean difficulty, mean stability, session stats, etc. |
 | GRU context | 32 | Final hidden state of GRU history encoder |
-| **Total** | **~113** | |
+| **Total** | **~49** | |
 
 **Return type**: Create a `MemoryState` dataclass or named tuple with fields: `S_next`, `D_next`, `p_recall`.
 
@@ -211,7 +206,7 @@ Output heads (all from h3):
 - `forward_from_features(features, S_prev)` — fast path when features are pre-assembled
 - `predict_recall(batch_dict)` — convenience: return only p_recall
 - `predict_stability(batch_dict)` — convenience: return only S_next
-- `build_features(batch_dict)` — assemble the 113-dim input vector
+- `build_features(batch_dict)` — assemble the 49-dim input vector
 - `count_parameters()` — return total trainable parameter count
 
 ### 3.2 GRU History Encoder (`models/gru_encoder.py`)
@@ -234,26 +229,6 @@ GRU(input_size=2, hidden_size=32, num_layers=1, batch_first=True)
 4. For cards with no history (first review), return a zero vector
 
 **Purpose**: Captures patterns like repeated "Again" presses (instability), regular review intervals (stability), or erratic spacing (uncertainty).
-
-### 3.3 Card Embedding Projector (`models/card_embeddings.py`)
-
-Build a trainable projection layer that compresses raw BERT embeddings to a smaller dimension:
-
-**Offline embedding function**:
-```python
-def embed_cards_offline(cards, model_name="all-MiniLM-L6-v2"):
-    """Embed card text using SentenceTransformer. Run once, save as .npz."""
-    # Input: list of dicts with 'front' and 'back' text
-    # Output: dict mapping card_id → 384-dim numpy array
-```
-
-**Trainable projector**:
-```python
-CardEmbeddingProjector(raw_dim=384, embed_dim=64):
-    Linear(384, 64) → L2-normalize(p=2, dim=-1)
-```
-
-This projection layer is part of the meta-parameters φ and gets updated during Reptile training. L2 normalization enables cosine distance computations.
 
 ---
 
@@ -416,7 +391,6 @@ class Review:
 class Task:
     student_id: str
     reviews: List[Review]
-    card_embeddings: Dict[str, np.ndarray]  # card_id → 384-dim
     support_set: List[Review]               # First 70% (for inner-loop training)
     query_set: List[Review]                 # Last 30% (for evaluation)
     
@@ -426,7 +400,7 @@ class Task:
 
 ### Batch Construction
 
-Implement `reviews_to_batch(reviews, card_embeddings, device, history_len=32)` that converts a list of Reviews into a dictionary of tensors:
+Implement `reviews_to_batch(reviews, device, history_len=32)` that converts a list of Reviews into a dictionary of tensors:
 
 - `D_prev`: (batch,) float
 - `S_prev`: (batch,) float
@@ -435,7 +409,6 @@ Implement `reviews_to_batch(reviews, card_embeddings, device, history_len=32)` t
 - `grade`: (batch,) long
 - `review_count`: (batch,) float — accumulated count per card within this batch
 - `recalled`: (batch,) float — target labels
-- `card_embedding_raw`: (batch, 384) float
 - `user_stats`: (batch, 8) float — aggregate stats (mean D, mean S, etc.)
 - `history_grades`: (batch, history_len) float — past grades for GRU
 - `history_delta_ts`: (batch, history_len) float — past elapsed times for GRU
@@ -462,7 +435,7 @@ class TaskSampler:
 Implement `ReviewDataset.generate_synthetic()` that uses FSRS-6 to simulate realistic review data:
 
 1. Create `n_students` (default 500), each with `reviews_per_student` (default 100) reviews
-2. Create `n_cards` (default 200) with random 384-dim embeddings
+2. Create `n_cards` (default 200)
 3. For each student, simulate reviews:
    - Randomly select a card
    - If first review: assign initial S and D from FSRS-6, grade drawn from weights [15%, 20%, 50%, 15%]
@@ -587,7 +560,6 @@ Build the main CLI entry point that orchestrates the full pipeline:
 | Argument | Type | Default | Purpose |
 |----------|------|---------|---------|
 | `--data` | str | None | Path to review CSV |
-| `--embeddings` | str | None | Path to card embeddings .npz |
 | `--synthetic` | flag | False | Use synthetic data |
 | `--n-students` | int | 500 | Number of synthetic students |
 | `--n-iters` | int | 50000 | Meta-iterations |
@@ -750,11 +722,9 @@ This should complete in ~4 minutes on CPU and demonstrate the full training → 
 
 5. **Chronological splits only**: Never randomly shuffle reviews within a student's history. The support/query split must be chronological (first 70% / last 30%) to simulate real-world deployment where we train on past data and predict the future.
 
-6. **Card embeddings are frozen at inference**: The CardEmbeddingProjector is part of φ and gets updated during meta-training, but the raw BERT embeddings are computed offline once and never change.
+6. **MC Dropout requires `model.train()`**: During inference uncertainty estimation, call `model.train()` (not `model.eval()`) so that dropout remains active across the Monte Carlo forward passes.
 
-7. **MC Dropout requires `model.train()`**: During inference uncertainty estimation, call `model.train()` (not `model.eval()`) so that dropout remains active across the Monte Carlo forward passes.
-
-8. **The FSRS-6 warm-start is optional but strongly recommended**: It cuts Reptile convergence time by ~60% and ensures the model starts from cognitively-valid predictions rather than random noise.
+7. **The FSRS-6 warm-start is optional but strongly recommended**: It cuts Reptile convergence time by ~60% and ensures the model starts from cognitively-valid predictions rather than random noise.
 
 ---
 
