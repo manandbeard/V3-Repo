@@ -34,8 +34,7 @@ meta-srs/
 ├── requirements.txt
 ├── models/
 │   ├── memory_net.py            # MemoryNet — neural DSR model (Section 2.2)
-│   ├── gru_encoder.py           # GRU history encoder (Section 2.4)
-│   └── card_embeddings.py       # BERT card embeddings + projection (Section 2.3)
+│   └── gru_encoder.py           # GRU history encoder (Section 2.4)
 ├── training/
 │   ├── fsrs_warmstart.py        # FSRS-6 baseline + warm-start (Section 1.1)
 │   ├── loss.py                  # Multi-component loss function (Section 3.3)
@@ -70,18 +69,8 @@ python train.py --synthetic --n-students 1000 --n-iters 5000
 Prepare a CSV with columns: `student_id, card_id, timestamp, elapsed_days, grade`
 
 ```bash
-# Pre-compute card embeddings (one-time)
-python -c "
-from models.card_embeddings import embed_cards_offline
-import json, numpy as np
-cards = json.load(open('cards.json'))  # [{id, front, back}, ...]
-embeds = embed_cards_offline(cards)
-np.savez('card_embeddings.npz', **embeds)
-print(f'Embedded {len(embeds)} cards')
-"
-
 # Full training run
-python train.py --data reviews.csv --embeddings card_embeddings.npz --n-iters 50000
+python train.py --data reviews.csv --n-iters 50000
 ```
 
 ### 4. Resume Training

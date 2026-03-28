@@ -70,7 +70,6 @@ def sample_batch_tensors(device):
         "delta_t": torch.tensor([3.0, 7.0, 14.0, 0.0], device=device),
         "grade": torch.tensor([3, 2, 4, 1], dtype=torch.long, device=device),
         "review_count": torch.tensor([5.0, 3.0, 10.0, 1.0], device=device),
-        "card_embedding_raw": torch.randn(batch_size, 384, device=device),
         "user_stats": torch.zeros(batch_size, 8, device=device),
         "history_grades": torch.tensor(
             [[3, 2, 0, 0], [4, 0, 0, 0], [3, 3, 2, 4], [0, 0, 0, 0]],
@@ -105,17 +104,6 @@ def sample_reviews():
                recalled=False, S_prev=1.0, D_prev=5.0, R_at_review=1.0,
                S_target=0.5, D_target=6.0),
     ]
-
-
-@pytest.fixture
-def card_embeddings():
-    """Sample card embeddings dict."""
-    np.random.seed(42)
-    return {
-        "c1": np.random.randn(384).astype(np.float32),
-        "c2": np.random.randn(384).astype(np.float32),
-        "c3": np.random.randn(384).astype(np.float32),
-    }
 
 
 @pytest.fixture

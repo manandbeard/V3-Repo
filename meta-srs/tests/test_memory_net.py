@@ -21,10 +21,9 @@ class TestMemoryNetArchitecture:
         assert 30_000 < n_params < 150_000, f"Unexpected param count: {n_params}"
 
     def test_input_dim(self, model):
-        assert model.input_dim == 113
+        assert model.input_dim == 49
 
     def test_submodules_exist(self, model):
-        assert hasattr(model, "card_projector")
         assert hasattr(model, "gru_encoder")
         assert hasattr(model, "stability_head")
         assert hasattr(model, "difficulty_head")
@@ -41,7 +40,6 @@ class TestMemoryNetForward:
             delta_t=batch["delta_t"],
             grade=batch["grade"],
             review_count=batch["review_count"],
-            card_embedding_raw=batch["card_embedding_raw"],
             user_stats=batch["user_stats"],
             history_grades=batch["history_grades"],
             history_delta_ts=batch["history_delta_ts"],
@@ -63,7 +61,6 @@ class TestMemoryNetForward:
                 delta_t=batch["delta_t"],
                 grade=batch["grade"],
                 review_count=batch["review_count"],
-                card_embedding_raw=batch["card_embedding_raw"],
                 user_stats=batch["user_stats"],
                 history_grades=batch["history_grades"],
                 history_delta_ts=batch["history_delta_ts"],
@@ -91,7 +88,6 @@ class TestMemoryNetForward:
                 delta_t=batch["delta_t"],
                 grade=batch["grade"],
                 review_count=batch["review_count"],
-                card_embedding_raw=batch["card_embedding_raw"],
                 user_stats=batch["user_stats"],
                 history_grades=batch["history_grades"],
                 history_delta_ts=batch["history_delta_ts"],
@@ -112,13 +108,12 @@ class TestBuildFeatures:
             delta_t=batch["delta_t"],
             grade=batch["grade"],
             review_count=batch["review_count"],
-            card_embedding_raw=batch["card_embedding_raw"],
             user_stats=batch["user_stats"],
             history_grades=batch["history_grades"],
             history_delta_ts=batch["history_delta_ts"],
             history_lengths=batch["history_lengths"],
         )
-        assert features.shape == (4, 113)
+        assert features.shape == (4, 49)
 
     def test_no_history_uses_zero_context(self, model, sample_batch_tensors, device):
         """When history is None, GRU should produce zero context."""
@@ -130,20 +125,19 @@ class TestBuildFeatures:
             delta_t=batch["delta_t"],
             grade=batch["grade"],
             review_count=batch["review_count"],
-            card_embedding_raw=batch["card_embedding_raw"],
             user_stats=batch["user_stats"],
             history_grades=None,
             history_delta_ts=None,
             history_lengths=None,
         )
-        assert features.shape == (4, 113)
+        assert features.shape == (4, 49)
         # Last 32 dims (GRU context) should be zero
         assert (features[:, -32:] == 0).all()
 
 
 class TestForwardFromFeatures:
     def test_forward_from_features(self, model, device):
-        features = torch.randn(4, 113, device=device)
+        features = torch.randn(4, 49, device=device)
         S_prev = torch.tensor([5.0, 10.0, 1.0, 20.0], device=device)
         state = model.forward_from_features(features, S_prev)
         assert state.S_next.shape == (4,)
@@ -151,14 +145,14 @@ class TestForwardFromFeatures:
         assert state.p_recall.shape == (4,)
 
     def test_predict_recall(self, model, device):
-        features = torch.randn(4, 113, device=device)
+        features = torch.randn(4, 49, device=device)
         S_prev = torch.tensor([5.0, 10.0, 1.0, 20.0], device=device)
         p = model.predict_recall(features, S_prev)
         assert p.shape == (4,)
         assert (p >= 0).all() and (p <= 1).all()
 
     def test_predict_stability(self, model, device):
-        features = torch.randn(4, 113, device=device)
+        features = torch.randn(4, 49, device=device)
         S_prev = torch.tensor([5.0, 10.0, 1.0, 20.0], device=device)
         S = model.predict_stability(features, S_prev)
         assert S.shape == (4,)
@@ -176,7 +170,6 @@ class TestGradientFlow:
             delta_t=batch["delta_t"],
             grade=batch["grade"],
             review_count=batch["review_count"],
-            card_embedding_raw=batch["card_embedding_raw"],
             user_stats=batch["user_stats"],
             history_grades=batch["history_grades"],
             history_delta_ts=batch["history_delta_ts"],

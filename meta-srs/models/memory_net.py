@@ -7,7 +7,7 @@ network (~50K parameters) that predicts memory-state transitions.
 The small footprint is intentional: fast-adaptation requires a network that
 moves meaningfully in just 5 gradient steps without overfitting.
 
-Input feature vector at each review event (dim = 113):
+Input feature vector at each review event (dim = 49):
     x = concat([
         D_prev,          # current difficulty [1, 10]              → 1
         log(S_prev),     # log stability (numerical stability)     → 1
@@ -15,10 +15,9 @@ Input feature vector at each review event (dim = 113):
         log(delta_t + 1),# log time since last review              → 1
         grade_onehot,    # [Again, Hard, Good, Easy]               → 4
         review_count,    # total reviews of this card              → 1
-        card_embed,      # 64-dim projected BERT embedding         → 64
         user_stats,      # mean D, mean S, session length, etc.    → 8
         context_h,       # GRU hidden state from review history    → 32
-    ])                                                       Total: 113
+    ])                                                       Total: 49
 
 Output heads:
     S_next   = Softplus(linear) * S_prev   — stability grows on success
@@ -32,7 +31,6 @@ import torch.nn.functional as F
 from typing import Tuple, Optional, NamedTuple
 
 from .gru_encoder import GRUHistoryEncoder
-from .card_embeddings import CardEmbeddingProjector
 
 
 class MemoryState(NamedTuple):
@@ -47,23 +45,21 @@ class MemoryNet(nn.Module):
     Neural memory-state transition model.
 
     Architecture:
-        Linear(113, 128) + LayerNorm + GELU
+        Linear(49, 128) + LayerNorm + GELU
         Linear(128, 128) + LayerNorm + GELU
         Linear(128, 64)  + GELU
         → 3 output heads: S_next, D_next, p_recall
     """
 
-    # Feature dimensions (must sum to input_dim=113)
+    # Feature dimensions (must sum to input_dim=49)
     SCALAR_FEATURES = 4   # D_prev, log_S_prev, R_at_review, log_delta_t
     GRADE_DIM = 4          # one-hot [Again, Hard, Good, Easy]
     COUNT_DIM = 1          # review_count (log-scaled)
 
     def __init__(
         self,
-        input_dim: int = 113,
+        input_dim: int = 49,
         hidden_dim: int = 128,
-        card_embed_dim: int = 64,
-        card_raw_dim: int = 384,
         gru_hidden_dim: int = 32,
         user_stats_dim: int = 8,
         dropout: float = 0.1,
@@ -73,12 +69,10 @@ class MemoryNet(nn.Module):
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.card_embed_dim = card_embed_dim
         self.gru_hidden_dim = gru_hidden_dim
         self.user_stats_dim = user_stats_dim
 
         # Sub-modules (part of phi, updated in meta-training)
-        self.card_projector = CardEmbeddingProjector(card_raw_dim, card_embed_dim)
         self.gru_encoder = GRUHistoryEncoder(gru_hidden_dim, max_len=history_len)
 
         # Main network
@@ -113,14 +107,13 @@ class MemoryNet(nn.Module):
         delta_t: torch.Tensor,
         grade: torch.Tensor,
         review_count: torch.Tensor,
-        card_embedding_raw: torch.Tensor,
         user_stats: torch.Tensor,
         history_grades: Optional[torch.Tensor] = None,
         history_delta_ts: Optional[torch.Tensor] = None,
         history_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Assemble the 113-dim input feature vector.
+        Assemble the 49-dim input feature vector.
 
         Args:
             D_prev:             (batch,) current difficulty [1, 10]
@@ -129,14 +122,13 @@ class MemoryNet(nn.Module):
             delta_t:            (batch,) days since last review
             grade:              (batch,) integer grade 1-4
             review_count:       (batch,) total reviews for this card
-            card_embedding_raw: (batch, 384) raw BERT embedding
             user_stats:         (batch, 8) user-level statistics
             history_grades:     (batch, seq_len) grade history for GRU
             history_delta_ts:   (batch, seq_len) delta_t history for GRU
             history_lengths:    (batch,) actual sequence lengths
 
         Returns:
-            x: (batch, 113) assembled feature vector
+            x: (batch, 49) assembled feature vector
         """
         batch_size = D_prev.size(0)
         device = D_prev.device
@@ -157,9 +149,6 @@ class MemoryNet(nn.Module):
         # Review count (log-scaled)
         count_feat = torch.log(review_count.float().clamp(min=1)).unsqueeze(-1)  # (batch, 1)
 
-        # Card embedding (trainable projection)
-        card_embed = self.card_projector(card_embedding_raw)  # (batch, 64)
-
         # GRU context
         if history_grades is not None and history_delta_ts is not None:
             context_h = self.gru_encoder(
@@ -173,10 +162,9 @@ class MemoryNet(nn.Module):
             scalars,       # 4
             grade_oh,      # 4
             count_feat,    # 1
-            card_embed,    # 64
             user_stats,    # 8
             context_h,     # 32
-        ], dim=-1)  # Total: 113
+        ], dim=-1)  # Total: 49
 
         # Dynamic padding/truncation to match expected input_dim (safety net)
         if x.size(-1) < self.input_dim:
@@ -220,7 +208,6 @@ class MemoryNet(nn.Module):
         delta_t: torch.Tensor,
         grade: torch.Tensor,
         review_count: torch.Tensor,
-        card_embedding_raw: torch.Tensor,
         user_stats: torch.Tensor,
         history_grades: Optional[torch.Tensor] = None,
         history_delta_ts: Optional[torch.Tensor] = None,
@@ -231,7 +218,7 @@ class MemoryNet(nn.Module):
         """
         x = self.build_features(
             D_prev, S_prev, R_at_review, delta_t, grade,
-            review_count, card_embedding_raw, user_stats,
+            review_count, user_stats,
             history_grades, history_delta_ts, history_lengths,
         )
         return self.forward_from_features(x, S_prev)

@@ -15,10 +15,8 @@ from config import (
 class TestModelConfig:
     def test_defaults(self):
         cfg = ModelConfig()
-        assert cfg.input_dim == 113
+        assert cfg.input_dim == 49
         assert cfg.hidden_dim == 128
-        assert cfg.card_embed_dim == 64
-        assert cfg.card_raw_dim == 384
         assert cfg.gru_hidden_dim == 32
         assert cfg.history_len == 32
         assert cfg.user_stats_dim == 8
@@ -26,9 +24,9 @@ class TestModelConfig:
         assert cfg.mc_samples == 20
 
     def test_feature_dim_sum(self):
-        """Verify input_dim = scalars(4) + grade(4) + count(1) + card(64) + user(8) + gru(32)."""
+        """Verify input_dim = scalars(4) + grade(4) + count(1) + user(8) + gru(32)."""
         cfg = ModelConfig()
-        expected = 4 + 4 + 1 + cfg.card_embed_dim + cfg.user_stats_dim + cfg.gru_hidden_dim
+        expected = 4 + 4 + 1 + cfg.user_stats_dim + cfg.gru_hidden_dim
         assert cfg.input_dim == expected
 
 

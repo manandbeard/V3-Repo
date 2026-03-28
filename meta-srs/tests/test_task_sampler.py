@@ -61,8 +61,8 @@ class TestTask:
 
 
 class TestReviewsToBatch:
-    def test_batch_shapes(self, sample_reviews, card_embeddings):
-        batch = reviews_to_batch(sample_reviews, card_embeddings)
+    def test_batch_shapes(self, sample_reviews):
+        batch = reviews_to_batch(sample_reviews)
         n = len(sample_reviews)
         assert batch["D_prev"].shape == (n,)
         assert batch["S_prev"].shape == (n,)
@@ -70,19 +70,18 @@ class TestReviewsToBatch:
         assert batch["delta_t"].shape == (n,)
         assert batch["grade"].shape == (n,)
         assert batch["review_count"].shape == (n,)
-        assert batch["card_embedding_raw"].shape == (n, 384)
         assert batch["user_stats"].shape == (n, 8)
         assert batch["recalled"].shape == (n,)
         assert batch["history_grades"].shape[0] == n
         assert batch["history_delta_ts"].shape[0] == n
         assert batch["history_lengths"].shape == (n,)
 
-    def test_batch_on_device(self, sample_reviews, card_embeddings, device):
-        batch = reviews_to_batch(sample_reviews, card_embeddings, device)
+    def test_batch_on_device(self, sample_reviews, device):
+        batch = reviews_to_batch(sample_reviews, device)
         for key, tensor in batch.items():
             assert tensor.device == device
 
-    def test_review_count_accumulates(self, card_embeddings):
+    def test_review_count_accumulates(self):
         """Review count should increase for repeated cards."""
         reviews = [
             Review(card_id="c1", timestamp=0, elapsed_days=0.0,
@@ -92,18 +91,9 @@ class TestReviewsToBatch:
             Review(card_id="c1", timestamp=2, elapsed_days=2.0,
                    grade=3, recalled=True),
         ]
-        batch = reviews_to_batch(reviews, card_embeddings)
+        batch = reviews_to_batch(reviews)
         counts = batch["review_count"].tolist()
         assert counts == [1.0, 2.0, 3.0]
-
-    def test_unknown_card_gets_zero_embedding(self):
-        """Cards not in embeddings dict should get zero vectors."""
-        reviews = [
-            Review(card_id="unknown", timestamp=0, elapsed_days=0.0,
-                   grade=3, recalled=True),
-        ]
-        batch = reviews_to_batch(reviews, card_embeddings={})
-        assert (batch["card_embedding_raw"] == 0).all()
 
 
 class TestTaskSampler:
@@ -171,15 +161,6 @@ class TestSyntheticGeneration:
                 assert review.D_prev >= 1.0
                 assert review.D_prev <= 10.0
                 assert 0.0 <= review.R_at_review <= 1.0
-
-    def test_synthetic_has_card_embeddings(self):
-        tasks = ReviewDataset.generate_synthetic(
-            n_students=3, reviews_per_student=10, n_cards=5, seed=42
-        )
-        for task in tasks:
-            assert len(task.card_embeddings) == 5
-            for cid, emb in task.card_embeddings.items():
-                assert emb.shape == (384,)
 
     def test_synthetic_deterministic(self):
         """Same seed should produce identical data."""

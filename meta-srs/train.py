@@ -4,17 +4,16 @@ MetaSRS — Main Training Script.
 
 Orchestrates the full training pipeline:
     1. Generate or load review data
-    2. (Optional) Pre-compute card embeddings with BERT
-    3. Warm-start MemoryNet from FSRS-6 predictions
-    4. Run Reptile meta-training
-    5. Evaluate and save phi*
+    2. Warm-start MemoryNet from FSRS-6 predictions
+    3. Run Reptile meta-training
+    4. Evaluate and save phi*
 
 Usage:
     # Quick test with synthetic data:
     python train.py --synthetic --n-students 100 --n-iters 500
 
     # Full training with real data:
-    python train.py --data reviews.csv --embeddings cards.npz --n-iters 50000
+    python train.py --data reviews.csv --n-iters 50000
 
     # Resume from checkpoint:
     python train.py --data reviews.csv --resume checkpoints/phi_iter_10000.pt
@@ -52,7 +51,6 @@ def parse_args():
 
     # Data
     parser.add_argument("--data", type=str, default=None, help="Path to review CSV file")
-    parser.add_argument("--embeddings", type=str, default=None, help="Path to card embeddings .npz")
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic data for testing")
     parser.add_argument("--n-students", type=int, default=500, help="Number of synthetic students")
 
@@ -114,7 +112,7 @@ def main():
         )
     elif args.data:
         print(f"Loading data from {args.data}...")
-        all_tasks = ReviewDataset.from_csv(args.data, args.embeddings)
+        all_tasks = ReviewDataset.from_csv(args.data)
     else:
         print("No data specified. Use --synthetic or --data. Defaulting to synthetic.")
         all_tasks = ReviewDataset.generate_synthetic(
@@ -149,8 +147,6 @@ def main():
     model = MemoryNet(
         input_dim=config.model.input_dim,
         hidden_dim=config.model.hidden_dim,
-        card_embed_dim=config.model.card_embed_dim,
-        card_raw_dim=config.model.card_raw_dim,
         gru_hidden_dim=config.model.gru_hidden_dim,
         user_stats_dim=config.model.user_stats_dim,
         dropout=config.model.dropout,
@@ -196,12 +192,12 @@ def main():
 
         for task in train_tasks[:200]:  # Use subset for speed
             batch = reviews_to_batch(
-                task.reviews, task.card_embeddings, device
+                task.reviews, device
             )
             features = model.build_features(
                 batch["D_prev"], batch["S_prev"], batch["R_at_review"],
                 batch["delta_t"], batch["grade"], batch["review_count"],
-                batch["card_embedding_raw"], batch["user_stats"],
+                batch["user_stats"],
             )
             targets = {
                 "S_target": batch["S_target"],

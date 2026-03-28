@@ -14,7 +14,6 @@ Task = {
         'grade': int,             # 1=Again, 2=Hard, 3=Good, 4=Easy
         'recalled': bool,         # grade >= 2
     }],
-    'card_embeddings': Dict[UUID, ndarray(64,)]
 }
 """
 
@@ -50,7 +49,6 @@ class Task:
     """
     student_id: str
     reviews: List[Review]
-    card_embeddings: Dict[str, np.ndarray] = field(default_factory=dict)
 
     # Support / query split
     support_set: List[Review] = field(default_factory=list)
@@ -78,9 +76,7 @@ class Task:
 
 def reviews_to_batch(
     reviews: List[Review],
-    card_embeddings: Dict[str, np.ndarray],
     device: torch.device = torch.device("cpu"),
-    card_raw_dim: int = 384,
     history_len: int = 32,
 ) -> Dict[str, torch.Tensor]:
     """
@@ -89,7 +85,7 @@ def reviews_to_batch(
 
     Returns dict with keys:
         D_prev, S_prev, R_at_review, delta_t, grade,
-        review_count, card_embedding_raw, user_stats, recalled
+        review_count, user_stats, recalled
     """
     n = len(reviews)
 
@@ -107,15 +103,6 @@ def reviews_to_batch(
         card_counts[r.card_id] = card_counts.get(r.card_id, 0) + 1
         review_count_list.append(float(card_counts[r.card_id]))
     review_count = torch.tensor(review_count_list, dtype=torch.float32)
-
-    # Card embeddings
-    embeds = []
-    for r in reviews:
-        if r.card_id in card_embeddings:
-            embeds.append(card_embeddings[r.card_id])
-        else:
-            embeds.append(np.zeros(card_raw_dim, dtype=np.float32))
-    card_embedding_raw = torch.tensor(np.stack(embeds), dtype=torch.float32)
 
     # User stats (placeholder: mean D, mean S, session length, etc.)
     # In production, compute from student's review history
@@ -169,7 +156,6 @@ def reviews_to_batch(
         "delta_t": delta_t.to(device),
         "grade": grade.to(device),
         "review_count": review_count.to(device),
-        "card_embedding_raw": card_embedding_raw.to(device),
         "user_stats": user_stats.to(device),
         "recalled": recalled.to(device),
         "S_target": S_target.to(device),
@@ -221,34 +207,22 @@ class ReviewDataset:
 
     Expected CSV columns:
         student_id, card_id, timestamp, elapsed_days, grade
-
-    Optional pre-computed embeddings loaded from .npz file.
     """
 
     @staticmethod
     def from_csv(
         csv_path: str,
-        embeddings_path: Optional[str] = None,
-        card_raw_dim: int = 384,
     ) -> List[Task]:
         """
         Load tasks from a CSV file.
 
         Args:
             csv_path: Path to CSV with review logs.
-            embeddings_path: Path to .npz file with card embeddings.
-            card_raw_dim: Dimension of raw BERT embeddings.
 
         Returns:
             List of Task objects, one per student.
         """
         import csv
-
-        # Load embeddings if available
-        card_embeddings: Dict[str, np.ndarray] = {}
-        if embeddings_path:
-            data = np.load(embeddings_path, allow_pickle=True)
-            card_embeddings = {str(k): data[k] for k in data.files}
 
         # Group reviews by student
         student_reviews: Dict[str, List[Review]] = defaultdict(list)
@@ -272,7 +246,6 @@ class ReviewDataset:
             task = Task(
                 student_id=sid,
                 reviews=reviews,
-                card_embeddings=card_embeddings,
             )
             tasks.append(task)
 
@@ -283,7 +256,6 @@ class ReviewDataset:
         n_students: int = 500,
         reviews_per_student: int = 100,
         n_cards: int = 200,
-        card_raw_dim: int = 384,
         seed: int = 42,
     ) -> List[Task]:
         """
@@ -296,12 +268,8 @@ class ReviewDataset:
         np_rng = np.random.RandomState(seed)
         fsrs = FSRS6()
 
-        # Random card embeddings
+        # Card IDs
         card_ids = [f"card_{i:04d}" for i in range(n_cards)]
-        card_embeddings = {
-            cid: np_rng.randn(card_raw_dim).astype(np.float32)
-            for cid in card_ids
-        }
 
         tasks = []
 
@@ -356,7 +324,6 @@ class ReviewDataset:
             task = Task(
                 student_id=student_id,
                 reviews=reviews,
-                card_embeddings=card_embeddings,
             )
             tasks.append(task)
 

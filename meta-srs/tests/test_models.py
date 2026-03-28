@@ -1,8 +1,7 @@
-"""Tests for GRU history encoder and card embedding projector."""
+"""Tests for GRU history encoder."""
 
 import sys
 import os
-import tempfile
 import numpy as np
 import torch
 import pytest
@@ -10,7 +9,6 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from models.gru_encoder import GRUHistoryEncoder
-from models.card_embeddings import CardEmbeddingProjector, CardEmbeddingStore
 
 
 class TestGRUHistoryEncoder:
@@ -51,66 +49,3 @@ class TestGRUHistoryEncoder:
         lengths = torch.tensor([50, 40], dtype=torch.long)
         out = encoder(grades, delta_ts, lengths)
         assert out.shape == (2, 32)
-
-
-class TestCardEmbeddingProjector:
-    @pytest.fixture
-    def projector(self):
-        return CardEmbeddingProjector(raw_dim=384, embed_dim=64)
-
-    def test_output_shape(self, projector):
-        raw = torch.randn(3, 384)
-        out = projector(raw)
-        assert out.shape == (3, 64)
-
-    def test_l2_normalized(self, projector):
-        """Output should be L2-normalized."""
-        raw = torch.randn(3, 384)
-        out = projector(raw)
-        norms = out.norm(p=2, dim=-1)
-        assert torch.allclose(norms, torch.ones(3), atol=1e-5)
-
-
-class TestCardEmbeddingStore:
-    def test_lookup_known_cards(self):
-        np.random.seed(42)
-        embeddings = {
-            "c1": np.random.randn(384).astype(np.float32),
-            "c2": np.random.randn(384).astype(np.float32),
-        }
-        store = CardEmbeddingStore(embeddings)
-        result = store.lookup(["c1", "c2"], torch.device("cpu"))
-        assert result.shape == (2, 384)
-
-    def test_lookup_unknown_card_returns_zero(self):
-        embeddings = {"c1": np.random.randn(384).astype(np.float32)}
-        store = CardEmbeddingStore(embeddings)
-        result = store.lookup(["c1", "unknown"], torch.device("cpu"))
-        assert (result[1] == 0).all()
-
-    def test_len(self):
-        embeddings = {
-            "c1": np.zeros(384, dtype=np.float32),
-            "c2": np.zeros(384, dtype=np.float32),
-        }
-        store = CardEmbeddingStore(embeddings)
-        assert len(store) == 2
-
-    def test_save_and_load(self):
-        np.random.seed(42)
-        embeddings = {
-            "c1": np.random.randn(384).astype(np.float32),
-            "c2": np.random.randn(384).astype(np.float32),
-        }
-        store = CardEmbeddingStore(embeddings)
-
-        with tempfile.NamedTemporaryFile(suffix=".npz", delete=False) as f:
-            path = f.name
-
-        try:
-            store.save(path)
-            loaded = CardEmbeddingStore.from_file(path)
-            assert len(loaded) == 2
-            assert np.allclose(loaded.embeddings["c1"], embeddings["c1"])
-        finally:
-            os.unlink(path)

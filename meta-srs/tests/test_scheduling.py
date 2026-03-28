@@ -23,7 +23,7 @@ def scheduler():
 @pytest.fixture
 def single_features():
     """Single card features for scheduling."""
-    return torch.randn(1, 113), torch.tensor([10.0])
+    return torch.randn(1, 49), torch.tensor([10.0])
 
 
 class TestComputeInterval:
@@ -127,7 +127,7 @@ class TestScheduleCard:
 
 class TestScheduleDeck:
     def test_returns_list(self, scheduler):
-        features = torch.randn(3, 113)
+        features = torch.randn(3, 49)
         S_prev = torch.tensor([5.0, 10.0, 20.0])
         results = scheduler.schedule_deck(
             ["c1", "c2", "c3"], features, S_prev

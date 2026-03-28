@@ -10,10 +10,8 @@ import math
 @dataclass
 class ModelConfig:
     """MemoryNet architecture (Section 2.2)."""
-    input_dim: int = 113          # Feature vector dimension (4+4+1+64+8+32)
+    input_dim: int = 49           # Feature vector dimension (4+4+1+8+32)
     hidden_dim: int = 128         # Hidden layer width
-    card_embed_dim: int = 64      # Projected card embedding dimension
-    card_raw_dim: int = 384       # Raw BERT embedding dimension (all-MiniLM-L6-v2)
     gru_hidden_dim: int = 32      # GRU history encoder hidden state
     history_len: int = 32         # Max review history length for GRU
     user_stats_dim: int = 8       # User-level statistics features
