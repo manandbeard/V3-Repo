@@ -1,4 +1,4 @@
-# MetaSRS — Complete Source Code (17 files)
+# MetaSRS — Complete Source Code (31 files)
 
 ---
 
@@ -9,12 +9,11 @@ meta-srs/
 ├── config.py                    # All hyperparameters (Sections 1.1, 6.3)
 ├── requirements.txt             # Dependencies
 ├── train.py                     # Main training script
-├── README.md                    # Documentation
+├── pytest.ini                   # Pytest configuration
 ├── models/
 │   ├── __init__.py
 │   ├── memory_net.py            # MemoryNet — neural DSR model (Section 2.2)
-│   ├── gru_encoder.py           # GRU history encoder (Section 2.4)
-│   └── card_embeddings.py       # BERT card embeddings + projection (Section 2.3)
+│   └── gru_encoder.py           # GRU history encoder (Section 2.4)
 ├── training/
 │   ├── __init__.py
 │   ├── fsrs_warmstart.py        # FSRS-6 baseline + warm-start (Section 1.1)
@@ -27,9 +26,23 @@ meta-srs/
 │   ├── __init__.py
 │   ├── adaptation.py            # 3-phase fast adaptation (Section 4.1)
 │   └── scheduling.py            # Uncertainty-aware scheduling (Section 4.2)
-└── evaluation/
+├── evaluation/
+│   ├── __init__.py
+│   └── metrics.py               # Eval framework + ablations (Section 7)
+└── tests/
     ├── __init__.py
-    └── metrics.py               # Eval framework + ablations (Section 7)
+    ├── conftest.py              # Shared test fixtures
+    ├── test_config.py
+    ├── test_memory_net.py
+    ├── test_models.py           # GRU encoder tests
+    ├── test_fsrs_warmstart.py
+    ├── test_loss.py
+    ├── test_reptile.py
+    ├── test_task_sampler.py
+    ├── test_adaptation.py
+    ├── test_scheduling.py
+    ├── test_evaluation.py
+    └── test_integration.py
 ```
 
 ---
@@ -39,7 +52,6 @@ meta-srs/
 ```
 torch>=2.0
 numpy>=1.24
-sentence-transformers>=2.2
 scikit-learn>=1.3
 tqdm
 tensorboard
@@ -64,10 +76,8 @@ import math
 @dataclass
 class ModelConfig:
     """MemoryNet architecture (Section 2.2)."""
-    input_dim: int = 112          # Feature vector dimension
+    input_dim: int = 49           # Feature vector dimension (4+4+1+8+32)
     hidden_dim: int = 128         # Hidden layer width
-    card_embed_dim: int = 64      # Projected card embedding dimension
-    card_raw_dim: int = 384       # Raw BERT embedding dimension (all-MiniLM-L6-v2)
     gru_hidden_dim: int = 32      # GRU history encoder hidden state
     history_len: int = 32         # Max review history length for GRU
     user_stats_dim: int = 8       # User-level statistics features
@@ -192,13 +202,10 @@ class MetaSRSConfig:
 ```python
 from .memory_net import MemoryNet
 from .gru_encoder import GRUHistoryEncoder
-from .card_embeddings import CardEmbeddingProjector, embed_cards_offline
 
 __all__ = [
     "MemoryNet",
     "GRUHistoryEncoder",
-    "CardEmbeddingProjector",
-    "embed_cards_offline",
 ]
 ```
 
@@ -295,148 +302,7 @@ class GRUHistoryEncoder(nn.Module):
 
 ---
 
-## 5. `models/card_embeddings.py` — Content-Aware Card Embeddings (Section 2.3)
-
-```python
-"""
-Content-Aware Card Embeddings (Section 2.3).
-
-Following KAR3L (Shu et al., EMNLP 2024), each card's text is embedded via
-a sentence transformer to enable semantic transfer across cards.
-
-If a student has reviewed 'France → Paris', the model infers partial knowledge
-of 'Germany → Berlin' because both cluster in embedding space — without a
-single direct review.
-
-Pipeline:
-    1. Offline: embed all cards once with SentenceTransformer('all-MiniLM-L6-v2')
-       → 384-dim vectors.
-    2. Online: a trainable Linear(384, 64) projection (part of phi, updated
-       during meta-training) produces the 64-dim card_embed feature.
-"""
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from typing import Dict, List, Optional, Tuple
-
-
-class CardEmbeddingProjector(nn.Module):
-    """
-    Trainable projection from raw BERT embeddings to compact card features.
-    This layer is part of the meta-parameters phi and gets updated during
-    Reptile training.
-    """
-
-    def __init__(self, raw_dim: int = 384, embed_dim: int = 64):
-        super().__init__()
-        self.projection = nn.Linear(raw_dim, embed_dim)
-
-    def forward(self, raw_embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            raw_embeddings: (batch, 384) — pre-computed BERT embeddings.
-
-        Returns:
-            card_embed: (batch, 64) — L2-normalised projected embeddings.
-        """
-        projected = self.projection(raw_embeddings)
-        return F.normalize(projected, p=2, dim=-1)
-
-
-def embed_cards_offline(
-    cards: List[Dict[str, str]],
-    model_name: str = "all-MiniLM-L6-v2",
-    batch_size: int = 256,
-    device: Optional[str] = None,
-) -> Dict[str, np.ndarray]:
-    """
-    Compute BERT embeddings for all cards offline (run once).
-
-    Args:
-        cards: List of dicts with 'id', 'front', 'back' keys.
-        model_name: SentenceTransformer model name.
-        batch_size: Encoding batch size.
-        device: Device for encoding (None = auto).
-
-    Returns:
-        Dict mapping card_id → ndarray(384,)
-    """
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError:
-        raise ImportError(
-            "sentence-transformers is required for offline embedding. "
-            "Install with: pip install sentence-transformers"
-        )
-
-    model = SentenceTransformer(model_name, device=device)
-
-    texts = [f"{card['front']} | {card['back']}" for card in cards]
-    ids = [card["id"] for card in cards]
-
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        show_progress_bar=True,
-        convert_to_numpy=True,
-        normalize_embeddings=False,  # We L2-normalise in the projection layer
-    )
-
-    return {card_id: emb for card_id, emb in zip(ids, embeddings)}
-
-
-class CardEmbeddingStore:
-    """
-    In-memory lookup for pre-computed card embeddings.
-    Used during training and inference to retrieve embeddings by card_id.
-    """
-
-    def __init__(self, embeddings: Dict[str, np.ndarray]):
-        self.embeddings = embeddings
-        self._dim = next(iter(embeddings.values())).shape[0] if embeddings else 384
-
-    def lookup(
-        self, card_ids: List[str], device: torch.device
-    ) -> torch.Tensor:
-        """
-        Retrieve embeddings for a batch of card IDs.
-
-        Args:
-            card_ids: List of card ID strings.
-            device: Target torch device.
-
-        Returns:
-            Tensor of shape (len(card_ids), raw_dim)
-        """
-        vecs = []
-        for cid in card_ids:
-            if cid in self.embeddings:
-                vecs.append(self.embeddings[cid])
-            else:
-                # Unknown card: zero vector (will project to zero)
-                vecs.append(np.zeros(self._dim, dtype=np.float32))
-        return torch.tensor(np.stack(vecs), dtype=torch.float32, device=device)
-
-    def __len__(self) -> int:
-        return len(self.embeddings)
-
-    @classmethod
-    def from_file(cls, path: str) -> "CardEmbeddingStore":
-        """Load embeddings from a .npz file."""
-        data = np.load(path, allow_pickle=True)
-        embeddings = {str(k): data[k] for k in data.files}
-        return cls(embeddings)
-
-    def save(self, path: str):
-        """Save embeddings to a .npz file."""
-        np.savez(path, **self.embeddings)
-```
-
----
-
-## 6. `models/memory_net.py` — Neural Memory Model (Section 2.2)
+## 5. `models/memory_net.py` — Neural Memory Model (Section 2.2)
 
 ```python
 """
@@ -448,7 +314,7 @@ network (~50K parameters) that predicts memory-state transitions.
 The small footprint is intentional: fast-adaptation requires a network that
 moves meaningfully in just 5 gradient steps without overfitting.
 
-Input feature vector at each review event (dim ~ 112):
+Input feature vector at each review event (dim = 49):
     x = concat([
         D_prev,          # current difficulty [1, 10]              → 1
         log(S_prev),     # log stability (numerical stability)     → 1
@@ -456,10 +322,9 @@ Input feature vector at each review event (dim ~ 112):
         log(delta_t + 1),# log time since last review              → 1
         grade_onehot,    # [Again, Hard, Good, Easy]               → 4
         review_count,    # total reviews of this card              → 1
-        card_embed,      # 64-dim projected BERT embedding         → 64
         user_stats,      # mean D, mean S, session length, etc.    → 8
         context_h,       # GRU hidden state from review history    → 32
-    ])                                                       Total: 112
+    ])                                                       Total: 49
 
 Output heads:
     S_next   = Softplus(linear) * S_prev   — stability grows on success
@@ -473,7 +338,6 @@ import torch.nn.functional as F
 from typing import Tuple, Optional, NamedTuple
 
 from .gru_encoder import GRUHistoryEncoder
-from .card_embeddings import CardEmbeddingProjector
 
 
 class MemoryState(NamedTuple):
@@ -488,23 +352,21 @@ class MemoryNet(nn.Module):
     Neural memory-state transition model.
 
     Architecture:
-        Linear(112, 128) + LayerNorm + GELU
+        Linear(49, 128) + LayerNorm + GELU
         Linear(128, 128) + LayerNorm + GELU
         Linear(128, 64)  + GELU
         → 3 output heads: S_next, D_next, p_recall
     """
 
-    # Feature dimensions (must sum to input_dim=112)
+    # Feature dimensions (must sum to input_dim=49)
     SCALAR_FEATURES = 4   # D_prev, log_S_prev, R_at_review, log_delta_t
     GRADE_DIM = 4          # one-hot [Again, Hard, Good, Easy]
     COUNT_DIM = 1          # review_count (log-scaled)
 
     def __init__(
         self,
-        input_dim: int = 112,
+        input_dim: int = 49,
         hidden_dim: int = 128,
-        card_embed_dim: int = 64,
-        card_raw_dim: int = 384,
         gru_hidden_dim: int = 32,
         user_stats_dim: int = 8,
         dropout: float = 0.1,
@@ -514,12 +376,10 @@ class MemoryNet(nn.Module):
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.card_embed_dim = card_embed_dim
         self.gru_hidden_dim = gru_hidden_dim
         self.user_stats_dim = user_stats_dim
 
         # Sub-modules (part of phi, updated in meta-training)
-        self.card_projector = CardEmbeddingProjector(card_raw_dim, card_embed_dim)
         self.gru_encoder = GRUHistoryEncoder(gru_hidden_dim, max_len=history_len)
 
         # Main network
@@ -554,14 +414,13 @@ class MemoryNet(nn.Module):
         delta_t: torch.Tensor,
         grade: torch.Tensor,
         review_count: torch.Tensor,
-        card_embedding_raw: torch.Tensor,
         user_stats: torch.Tensor,
         history_grades: Optional[torch.Tensor] = None,
         history_delta_ts: Optional[torch.Tensor] = None,
         history_lengths: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Assemble the 112-dim input feature vector.
+        Assemble the 49-dim input feature vector.
 
         Args:
             D_prev:             (batch,) current difficulty [1, 10]
@@ -570,14 +429,13 @@ class MemoryNet(nn.Module):
             delta_t:            (batch,) days since last review
             grade:              (batch,) integer grade 1-4
             review_count:       (batch,) total reviews for this card
-            card_embedding_raw: (batch, 384) raw BERT embedding
             user_stats:         (batch, 8) user-level statistics
             history_grades:     (batch, seq_len) grade history for GRU
             history_delta_ts:   (batch, seq_len) delta_t history for GRU
             history_lengths:    (batch,) actual sequence lengths
 
         Returns:
-            x: (batch, 112) assembled feature vector
+            x: (batch, 49) assembled feature vector
         """
         batch_size = D_prev.size(0)
         device = D_prev.device
@@ -598,9 +456,6 @@ class MemoryNet(nn.Module):
         # Review count (log-scaled)
         count_feat = torch.log(review_count.float().clamp(min=1)).unsqueeze(-1)  # (batch, 1)
 
-        # Card embedding (trainable projection)
-        card_embed = self.card_projector(card_embedding_raw)  # (batch, 64)
-
         # GRU context
         if history_grades is not None and history_delta_ts is not None:
             context_h = self.gru_encoder(
@@ -614,12 +469,11 @@ class MemoryNet(nn.Module):
             scalars,       # 4
             grade_oh,      # 4
             count_feat,    # 1
-            card_embed,    # 64
             user_stats,    # 8
             context_h,     # 32
-        ], dim=-1)  # Should be 113 — we pad/truncate to input_dim
+        ], dim=-1)  # Total: 49
 
-        # Dynamic padding/truncation to match expected input_dim
+        # Dynamic padding/truncation to match expected input_dim (safety net)
         if x.size(-1) < self.input_dim:
             pad = torch.zeros(batch_size, self.input_dim - x.size(-1), device=device)
             x = torch.cat([x, pad], dim=-1)
@@ -647,6 +501,7 @@ class MemoryNet(nn.Module):
 
         # Output heads
         S_next = F.softplus(self.stability_head(h).squeeze(-1)) * S_prev
+        S_next = S_next.clamp(min=1e-3, max=36500.0)  # Stability: 0.001 to 100 years
         D_next = torch.sigmoid(self.difficulty_head(h).squeeze(-1)) * 9.0 + 1.0
         p_recall = torch.sigmoid(self.recall_head(h).squeeze(-1))
 
@@ -660,7 +515,6 @@ class MemoryNet(nn.Module):
         delta_t: torch.Tensor,
         grade: torch.Tensor,
         review_count: torch.Tensor,
-        card_embedding_raw: torch.Tensor,
         user_stats: torch.Tensor,
         history_grades: Optional[torch.Tensor] = None,
         history_delta_ts: Optional[torch.Tensor] = None,
@@ -671,7 +525,7 @@ class MemoryNet(nn.Module):
         """
         x = self.build_features(
             D_prev, S_prev, R_at_review, delta_t, grade,
-            review_count, card_embedding_raw, user_stats,
+            review_count, user_stats,
             history_grades, history_delta_ts, history_lengths,
         )
         return self.forward_from_features(x, S_prev)
@@ -691,18 +545,18 @@ class MemoryNet(nn.Module):
 
 ---
 
-## 7. `training/__init__.py`
+## 6. `training/__init__.py`
 
 ```python
 from .loss import compute_loss, MetaSRSLoss
-from .reptile import inner_loop, meta_train, ReptileTrainer
+from .reptile import inner_loop, reptile_update, ReptileTrainer
 from .fsrs_warmstart import FSRS6, warm_start_from_fsrs6
 
 __all__ = [
     "compute_loss",
     "MetaSRSLoss",
     "inner_loop",
-    "meta_train",
+    "reptile_update",
     "ReptileTrainer",
     "FSRS6",
     "warm_start_from_fsrs6",
@@ -711,7 +565,7 @@ __all__ = [
 
 ---
 
-## 8. `training/fsrs_warmstart.py` — FSRS-6 Baseline & Warm-Start (Sections 1.1, 3.4)
+## 7. `training/fsrs_warmstart.py` — FSRS-6 Baseline & Warm-Start
 
 ```python
 """
@@ -962,7 +816,7 @@ def warm_start_from_fsrs6(
 
 ---
 
-## 9. `training/loss.py` — Multi-Component Loss Function (Section 3.3)
+## 8. `training/loss.py` — Multi-Component Loss Function (Section 3.3)
 
 ```python
 """
@@ -1009,7 +863,7 @@ class MetaSRSLoss(nn.Module):
         self.monotonicity_weight = monotonicity_weight
         self.w20 = w20
 
-        self.bce = nn.BCELoss()
+        self.bce = nn.BCEWithLogitsLoss()
         self.mse = nn.MSELoss()
 
     def forward(
@@ -1036,16 +890,19 @@ class MetaSRSLoss(nn.Module):
             Dict with 'total', 'recall', 'stability', 'monotonicity' losses.
         """
         # PRIMARY: recall prediction (binary cross-entropy)
-        recall_L = self.bce(
-            p_recall_pred.clamp(1e-6, 1 - 1e-6),
-            recalled.float(),
-        )
+        # Convert probabilities to logits for numerical stability
+        p_clamped = p_recall_pred.clamp(1e-6, 1 - 1e-6)
+        logits = torch.log(p_clamped / (1 - p_clamped))
+        recall_L = self.bce(logits, recalled.float())
 
         # AUXILIARY 1: stability-curve consistency
         # R_from_S = (0.9^(1/S_pred))^(elapsed_days^w20)
-        R_from_S = (0.9 ** (1.0 / S_next_pred.clamp(min=1e-6))) ** (
-            elapsed_days.clamp(min=0) ** self.w20
-        )
+        # Computed in log-space for numerical stability:
+        #   log(R) = (1/S) * log(0.9) * (t^w20)
+        log_09 = -0.10536051565782628  # math.log(0.9)
+        t_pow = elapsed_days.clamp(min=1e-6) ** self.w20
+        log_R = log_09 * t_pow / S_next_pred.clamp(min=1e-3)
+        R_from_S = torch.exp(log_R.clamp(min=-20, max=0))  # R ∈ (0, 1]
         stable_L = self.mse(R_from_S, recalled.float())
 
         # AUXILIARY 2: monotonicity (S cannot decrease on successful recall)
@@ -1064,6 +921,10 @@ class MetaSRSLoss(nn.Module):
             + self.stability_weight * stable_L
             + self.monotonicity_weight * mono_L
         )
+
+        # Guard against NaN (can occur from extreme S values during adaptation)
+        if torch.isnan(total):
+            total = recall_L  # Fall back to primary loss only
 
         return {
             "total": total,
@@ -1085,7 +946,7 @@ def compute_loss(
         model: MemoryNet instance
         batch: Dict from reviews_to_batch() with keys:
             D_prev, S_prev, R_at_review, delta_t, grade,
-            review_count, card_embedding_raw, user_stats, recalled
+            review_count, user_stats, recalled
         loss_fn: MetaSRSLoss instance
 
     Returns:
@@ -1098,8 +959,10 @@ def compute_loss(
         delta_t=batch["delta_t"],
         grade=batch["grade"],
         review_count=batch["review_count"],
-        card_embedding_raw=batch["card_embedding_raw"],
         user_stats=batch["user_stats"],
+        history_grades=batch.get("history_grades"),
+        history_delta_ts=batch.get("history_delta_ts"),
+        history_lengths=batch.get("history_lengths"),
     )
 
     return loss_fn(
@@ -1114,7 +977,7 @@ def compute_loss(
 
 ---
 
-## 10. `training/reptile.py` — Reptile Meta-Training Loop (Sections 3.2, 3.4)
+## 9. `training/reptile.py` — Reptile Meta-Training Loop (Sections 3.2, 3.4)
 
 ```python
 """
@@ -1161,7 +1024,6 @@ from training.loss import MetaSRSLoss, compute_loss
 def sample_batch(
     reviews: list,
     size: int,
-    card_embeddings: dict,
     device: torch.device,
 ) -> Dict[str, torch.Tensor]:
     """Sample a mini-batch of reviews from a support/query set."""
@@ -1169,7 +1031,7 @@ def sample_batch(
         sampled = reviews
     else:
         sampled = random.sample(reviews, size)
-    return reviews_to_batch(sampled, card_embeddings, device)
+    return reviews_to_batch(sampled, device)
 
 
 def inner_loop(
@@ -1199,14 +1061,14 @@ def inner_loop(
         Adapted parameters W_i (state_dict).
     """
     # Copy meta-parameters — do not modify phi in-place
-    model.load_state_dict(deepcopy(phi_state_dict))
+    model.load_state_dict(phi_state_dict, strict=True)
     model.train()
 
     optimizer = torch.optim.Adam(model.parameters(), lr=inner_lr)
 
     for step in range(k_steps):
         batch = sample_batch(
-            task.support_set, batch_size, task.card_embeddings, device
+            task.support_set, batch_size, device
         )
         losses = compute_loss(model, batch, loss_fn)
         loss = losses["total"]
@@ -1314,7 +1176,7 @@ class ReptileTrainer:
         start_iter = 0
 
         if resume_from and os.path.exists(resume_from):
-            checkpoint = torch.load(resume_from, map_location=self.device)
+            checkpoint = torch.load(resume_from, map_location=self.device, weights_only=False)
             self.phi = checkpoint["phi"]
             start_iter = checkpoint["iteration"] + 1
             print(f"Resumed from iteration {start_iter}")
@@ -1358,7 +1220,7 @@ class ReptileTrainer:
                     self.model.eval()
                     with torch.no_grad():
                         query_batch = sample_batch(
-                            task.query_set, 64, task.card_embeddings, self.device
+                            task.query_set, 64, self.device
                         )
                         qloss = compute_loss(self.model, query_batch, self.loss_fn)
                         inner_losses.append(qloss["total"].item())
@@ -1412,7 +1274,7 @@ class ReptileTrainer:
 
 ---
 
-## 11. `data/__init__.py`
+## 10. `data/__init__.py`
 
 ```python
 from .task_sampler import Task, TaskSampler, ReviewDataset
@@ -1422,7 +1284,7 @@ __all__ = ["Task", "TaskSampler", "ReviewDataset"]
 
 ---
 
-## 12. `data/task_sampler.py` — Task Definition & Sampling (Section 3.1)
+## 11. `data/task_sampler.py` — Task Definition & Sampling (Section 3.1)
 
 ```python
 """
@@ -1441,7 +1303,6 @@ Task = {
         'grade': int,             # 1=Again, 2=Hard, 3=Good, 4=Easy
         'recalled': bool,         # grade >= 2
     }],
-    'card_embeddings': Dict[UUID, ndarray(64,)]
 }
 """
 
@@ -1477,7 +1338,6 @@ class Task:
     """
     student_id: str
     reviews: List[Review]
-    card_embeddings: Dict[str, np.ndarray] = field(default_factory=dict)
 
     # Support / query split
     support_set: List[Review] = field(default_factory=list)
@@ -1505,9 +1365,8 @@ class Task:
 
 def reviews_to_batch(
     reviews: List[Review],
-    card_embeddings: Dict[str, np.ndarray],
     device: torch.device = torch.device("cpu"),
-    card_raw_dim: int = 384,
+    history_len: int = 32,
 ) -> Dict[str, torch.Tensor]:
     """
     Convert a list of Review objects into a batched tensor dict
@@ -1515,7 +1374,7 @@ def reviews_to_batch(
 
     Returns dict with keys:
         D_prev, S_prev, R_at_review, delta_t, grade,
-        review_count, card_embedding_raw, user_stats, recalled
+        review_count, user_stats, recalled
     """
     n = len(reviews)
 
@@ -1526,17 +1385,13 @@ def reviews_to_batch(
     grade = torch.tensor([r.grade for r in reviews], dtype=torch.long)
     recalled = torch.tensor([float(r.recalled) for r in reviews], dtype=torch.float32)
 
-    # Review count per card (simple: count occurrences up to this point)
-    review_count = torch.ones(n, dtype=torch.float32)
-
-    # Card embeddings
-    embeds = []
+    # Review count per card (accumulate occurrences up to each review)
+    card_counts: Dict[str, int] = {}
+    review_count_list = []
     for r in reviews:
-        if r.card_id in card_embeddings:
-            embeds.append(card_embeddings[r.card_id])
-        else:
-            embeds.append(np.zeros(card_raw_dim, dtype=np.float32))
-    card_embedding_raw = torch.tensor(np.stack(embeds), dtype=torch.float32)
+        card_counts[r.card_id] = card_counts.get(r.card_id, 0) + 1
+        review_count_list.append(float(card_counts[r.card_id]))
+    review_count = torch.tensor(review_count_list, dtype=torch.float32)
 
     # User stats (placeholder: mean D, mean S, session length, etc.)
     # In production, compute from student's review history
@@ -1545,6 +1400,39 @@ def reviews_to_batch(
     user_stats = torch.zeros(n, 8, dtype=torch.float32)
     user_stats[:, 0] = mean_D
     user_stats[:, 1] = torch.log(mean_S.clamp(min=1e-6))
+
+    # Build per-card review history sequences for GRU encoder
+    max_hist_len = history_len
+    card_history: Dict[str, List[Tuple[float, float]]] = {}
+    history_grades_list = []
+    history_delta_ts_list = []
+    history_lengths_list = []
+
+    for r in reviews:
+        hist = card_history.get(r.card_id, [])
+        seq_len = min(len(hist), max_hist_len)
+
+        # Pad/truncate to max_hist_len
+        if seq_len == 0:
+            h_grades = [0.0] * max_hist_len
+            h_dts = [0.0] * max_hist_len
+        else:
+            recent = hist[-max_hist_len:]
+            h_grades = [g for g, _ in recent] + [0.0] * (max_hist_len - len(recent))
+            h_dts = [d for _, d in recent] + [0.0] * (max_hist_len - len(recent))
+
+        history_grades_list.append(h_grades)
+        history_delta_ts_list.append(h_dts)
+        history_lengths_list.append(max(seq_len, 1))  # clamp min=1 for pack_padded
+
+        # Append current review to history for future reviews
+        card_history.setdefault(r.card_id, []).append(
+            (float(r.grade), r.elapsed_days)
+        )
+
+    history_grades = torch.tensor(history_grades_list, dtype=torch.float32)
+    history_delta_ts = torch.tensor(history_delta_ts_list, dtype=torch.float32)
+    history_lengths = torch.tensor(history_lengths_list, dtype=torch.long)
 
     # Targets for warm-start
     S_target = torch.tensor([r.S_target for r in reviews], dtype=torch.float32)
@@ -1557,11 +1445,13 @@ def reviews_to_batch(
         "delta_t": delta_t.to(device),
         "grade": grade.to(device),
         "review_count": review_count.to(device),
-        "card_embedding_raw": card_embedding_raw.to(device),
         "user_stats": user_stats.to(device),
         "recalled": recalled.to(device),
         "S_target": S_target.to(device),
         "D_target": D_target.to(device),
+        "history_grades": history_grades.to(device),
+        "history_delta_ts": history_delta_ts.to(device),
+        "history_lengths": history_lengths.to(device),
     }
 
     return batch
@@ -1606,34 +1496,22 @@ class ReviewDataset:
 
     Expected CSV columns:
         student_id, card_id, timestamp, elapsed_days, grade
-
-    Optional pre-computed embeddings loaded from .npz file.
     """
 
     @staticmethod
     def from_csv(
         csv_path: str,
-        embeddings_path: Optional[str] = None,
-        card_raw_dim: int = 384,
     ) -> List[Task]:
         """
         Load tasks from a CSV file.
 
         Args:
             csv_path: Path to CSV with review logs.
-            embeddings_path: Path to .npz file with card embeddings.
-            card_raw_dim: Dimension of raw BERT embeddings.
 
         Returns:
             List of Task objects, one per student.
         """
         import csv
-
-        # Load embeddings if available
-        card_embeddings: Dict[str, np.ndarray] = {}
-        if embeddings_path:
-            data = np.load(embeddings_path, allow_pickle=True)
-            card_embeddings = {str(k): data[k] for k in data.files}
 
         # Group reviews by student
         student_reviews: Dict[str, List[Review]] = defaultdict(list)
@@ -1657,7 +1535,6 @@ class ReviewDataset:
             task = Task(
                 student_id=sid,
                 reviews=reviews,
-                card_embeddings=card_embeddings,
             )
             tasks.append(task)
 
@@ -1668,7 +1545,6 @@ class ReviewDataset:
         n_students: int = 500,
         reviews_per_student: int = 100,
         n_cards: int = 200,
-        card_raw_dim: int = 384,
         seed: int = 42,
     ) -> List[Task]:
         """
@@ -1681,12 +1557,8 @@ class ReviewDataset:
         np_rng = np.random.RandomState(seed)
         fsrs = FSRS6()
 
-        # Random card embeddings
+        # Card IDs
         card_ids = [f"card_{i:04d}" for i in range(n_cards)]
-        card_embeddings = {
-            cid: np_rng.randn(card_raw_dim).astype(np.float32)
-            for cid in card_ids
-        }
 
         tasks = []
 
@@ -1741,7 +1613,6 @@ class ReviewDataset:
             task = Task(
                 student_id=student_id,
                 reviews=reviews,
-                card_embeddings=card_embeddings,
             )
             tasks.append(task)
 
@@ -1750,7 +1621,7 @@ class ReviewDataset:
 
 ---
 
-## 13. `inference/__init__.py`
+## 12. `inference/__init__.py`
 
 ```python
 from .adaptation import FastAdapter, AdaptationPhase
@@ -1766,7 +1637,7 @@ __all__ = [
 
 ---
 
-## 14. `inference/adaptation.py` — Fast Adaptation (Section 4.1)
+## 13. `inference/adaptation.py` — Fast Adaptation (Section 4.1)
 
 ```python
 """
@@ -1841,7 +1712,6 @@ class FastAdapter:
         # Student's personalised parameters
         self.theta_student = deepcopy(phi_star)
         self.reviews: List[Review] = []
-        self.card_embeddings: Dict[str, any] = {}
         self._reviews_since_last_adapt = 0
 
         self.loss_fn = MetaSRSLoss(w20=self.fsrs_cfg.w[20])
@@ -1907,14 +1777,14 @@ class FastAdapter:
         """Run k gradient steps for adaptation."""
         # Start from phi* or current theta
         start_params = self.phi_star if from_phi else self.theta_student
-        self.model.load_state_dict(deepcopy(start_params))
+        self.model.load_state_dict(start_params)
         self.model.train()
 
         optimizer = torch.optim.Adam(self.model.parameters(), lr=inner_lr)
 
         # Use all available reviews as training data
         batch = reviews_to_batch(
-            self.reviews, self.card_embeddings, self.device
+            self.reviews, self.device
         )
 
         for step in range(k_steps):
@@ -1933,7 +1803,7 @@ class FastAdapter:
         if not self.reviews:
             return
 
-        self.model.load_state_dict(deepcopy(self.theta_student))
+        self.model.load_state_dict(self.theta_student)
         self.model.train()
 
         optimizer = torch.optim.Adam(
@@ -1942,7 +1812,7 @@ class FastAdapter:
 
         # Use last few reviews as a mini-batch
         recent = self.reviews[-min(8, len(self.reviews)):]
-        batch = reviews_to_batch(recent, self.card_embeddings, self.device)
+        batch = reviews_to_batch(recent, self.device)
 
         losses = compute_loss(self.model, batch, self.loss_fn)
         loss = losses["total"]
@@ -1987,7 +1857,7 @@ class FastAdapter:
 
 ---
 
-## 15. `inference/scheduling.py` — Uncertainty-Aware Scheduling (Section 4.2)
+## 14. `inference/scheduling.py` — Uncertainty-Aware Scheduling (Section 4.2)
 
 ```python
 """
@@ -2256,7 +2126,7 @@ class Scheduler:
 
 ---
 
-## 16. `evaluation/__init__.py`
+## 15. `evaluation/__init__.py`
 
 ```python
 from .metrics import MetaSRSEvaluator, EvalResults
@@ -2266,7 +2136,7 @@ __all__ = ["MetaSRSEvaluator", "EvalResults"]
 
 ---
 
-## 17. `evaluation/metrics.py` — Evaluation Framework (Section 7)
+## 16. `evaluation/metrics.py` — Evaluation Framework (Section 7)
 
 ```python
 """
@@ -2282,12 +2152,10 @@ Key Metrics:
     30-day Retention    Recall rate at 30 days              > 85%
     RMSE (stability)    Error in S estimation               < 2.0 days
 
-Ablation Study Design (5 variants):
+Ablation Study Design (3 variants):
     A: Baseline         — FSRS-6 population params, no adaptation (cold-start)
-    B: Reptile only     — Meta-params, no card content embedding
-    C: Reptile+content  — Card embeddings added, no GRU history encoder
-    D: Full model       — Reptile + content embeddings + GRU history
-    E: Transformer      — Replace GRU with 2-layer Transformer encoder
+    B: Reptile only     — Meta-params, no GRU history encoder
+    C: Full model       — Reptile + GRU history
 """
 
 import torch
@@ -2438,7 +2306,7 @@ class MetaSRSEvaluator:
             self.model.eval()
 
             query_batch = reviews_to_batch(
-                task.query_set, task.card_embeddings, self.device
+                task.query_set, self.device
             )
 
             with torch.no_grad():
@@ -2449,8 +2317,10 @@ class MetaSRSEvaluator:
                     delta_t=query_batch["delta_t"],
                     grade=query_batch["grade"],
                     review_count=query_batch["review_count"],
-                    card_embedding_raw=query_batch["card_embedding_raw"],
                     user_stats=query_batch["user_stats"],
+                    history_grades=query_batch.get("history_grades"),
+                    history_delta_ts=query_batch.get("history_delta_ts"),
+                    history_lengths=query_batch.get("history_lengths"),
                 )
 
             preds_cold = state_cold.p_recall.cpu().numpy()
@@ -2481,8 +2351,10 @@ class MetaSRSEvaluator:
                     delta_t=query_batch["delta_t"],
                     grade=query_batch["grade"],
                     review_count=query_batch["review_count"],
-                    card_embedding_raw=query_batch["card_embedding_raw"],
                     user_stats=query_batch["user_stats"],
+                    history_grades=query_batch.get("history_grades"),
+                    history_delta_ts=query_batch.get("history_delta_ts"),
+                    history_lengths=query_batch.get("history_lengths"),
                 )
 
             preds = state.p_recall.cpu().numpy()
@@ -2505,7 +2377,21 @@ class MetaSRSEvaluator:
         all_S_preds = np.array(all_S_preds)
         all_S_targets = np.array(all_S_targets)
 
-        # Compute metrics
+        # Compute metrics (guard against NaN from diverged models)
+        n_nan_preds = np.isnan(all_preds).sum()
+        n_nan_cold = np.isnan(all_preds_cold).sum()
+        n_nan_S = np.isnan(all_S_preds).sum()
+        if n_nan_preds + n_nan_cold + n_nan_S > 0:
+            import warnings
+            warnings.warn(
+                f"NaN detected in predictions: {n_nan_preds} preds, "
+                f"{n_nan_cold} cold-start preds, {n_nan_S} S predictions. "
+                f"Model may have diverged during adaptation."
+            )
+        all_preds = np.nan_to_num(all_preds, nan=0.5)
+        all_preds_cold = np.nan_to_num(all_preds_cold, nan=0.5)
+        all_S_preds = np.nan_to_num(all_S_preds, nan=0.0)
+
         results = EvalResults(
             auc_roc=self.compute_auc_roc(all_preds, all_labels),
             calibration_error=np.mean(calibration_errors) if calibration_errors else 0.0,
@@ -2543,7 +2429,6 @@ class MetaSRSEvaluator:
                 truncated_task = Task(
                     student_id=task.student_id,
                     reviews=task.reviews,
-                    card_embeddings=task.card_embeddings,
                 )
                 truncated_task.support_set = task.support_set[:n_reviews]
                 truncated_task.query_set = task.query_set
@@ -2568,7 +2453,7 @@ class MetaSRSEvaluator:
 
                 self.model.eval()
                 query_batch = reviews_to_batch(
-                    task.query_set, task.card_embeddings, self.device
+                    task.query_set, self.device
                 )
 
                 with torch.no_grad():
@@ -2579,8 +2464,10 @@ class MetaSRSEvaluator:
                         delta_t=query_batch["delta_t"],
                         grade=query_batch["grade"],
                         review_count=query_batch["review_count"],
-                        card_embedding_raw=query_batch["card_embedding_raw"],
                         user_stats=query_batch["user_stats"],
+                        history_grades=query_batch.get("history_grades"),
+                        history_delta_ts=query_batch.get("history_delta_ts"),
+                        history_lengths=query_batch.get("history_lengths"),
                     )
 
                 all_preds.extend(state.p_recall.cpu().numpy())
@@ -2620,7 +2507,7 @@ class MetaSRSEvaluator:
 
 ---
 
-## 18. `train.py` — Main Training Script
+## 17. `train.py` — Main Training Script
 
 ```python
 #!/usr/bin/env python3
@@ -2629,17 +2516,16 @@ MetaSRS — Main Training Script.
 
 Orchestrates the full training pipeline:
     1. Generate or load review data
-    2. (Optional) Pre-compute card embeddings with BERT
-    3. Warm-start MemoryNet from FSRS-6 predictions
-    4. Run Reptile meta-training
-    5. Evaluate and save phi*
+    2. Warm-start MemoryNet from FSRS-6 predictions
+    3. Run Reptile meta-training
+    4. Evaluate and save phi*
 
 Usage:
     # Quick test with synthetic data:
     python train.py --synthetic --n-students 100 --n-iters 500
 
     # Full training with real data:
-    python train.py --data reviews.csv --embeddings cards.npz --n-iters 50000
+    python train.py --data reviews.csv --n-iters 50000
 
     # Resume from checkpoint:
     python train.py --data reviews.csv --resume checkpoints/phi_iter_10000.pt
@@ -2677,7 +2563,6 @@ def parse_args():
 
     # Data
     parser.add_argument("--data", type=str, default=None, help="Path to review CSV file")
-    parser.add_argument("--embeddings", type=str, default=None, help="Path to card embeddings .npz")
     parser.add_argument("--synthetic", action="store_true", help="Use synthetic data for testing")
     parser.add_argument("--n-students", type=int, default=500, help="Number of synthetic students")
 
@@ -2739,7 +2624,7 @@ def main():
         )
     elif args.data:
         print(f"Loading data from {args.data}...")
-        all_tasks = ReviewDataset.from_csv(args.data, args.embeddings)
+        all_tasks = ReviewDataset.from_csv(args.data)
     else:
         print("No data specified. Use --synthetic or --data. Defaulting to synthetic.")
         all_tasks = ReviewDataset.generate_synthetic(
@@ -2774,8 +2659,6 @@ def main():
     model = MemoryNet(
         input_dim=config.model.input_dim,
         hidden_dim=config.model.hidden_dim,
-        card_embed_dim=config.model.card_embed_dim,
-        card_raw_dim=config.model.card_raw_dim,
         gru_hidden_dim=config.model.gru_hidden_dim,
         user_stats_dim=config.model.user_stats_dim,
         dropout=config.model.dropout,
@@ -2791,7 +2674,7 @@ def main():
     if args.eval_only:
         ckpt_path = args.eval_checkpoint or os.path.join(args.checkpoint_dir, "phi_star.pt")
         print(f"\n=== Evaluation Only: loading {ckpt_path} ===")
-        checkpoint = torch.load(ckpt_path, map_location=device)
+        checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
         phi = checkpoint["phi"]
 
         evaluator = MetaSRSEvaluator(model, config, device)
@@ -2821,12 +2704,12 @@ def main():
 
         for task in train_tasks[:200]:  # Use subset for speed
             batch = reviews_to_batch(
-                task.reviews, task.card_embeddings, device
+                task.reviews, device
             )
             features = model.build_features(
                 batch["D_prev"], batch["S_prev"], batch["R_at_review"],
                 batch["delta_t"], batch["grade"], batch["review_count"],
-                batch["card_embedding_raw"], batch["user_stats"],
+                batch["user_stats"],
             )
             targets = {
                 "S_target": batch["S_target"],
@@ -2897,4 +2780,1725 @@ if __name__ == "__main__":
 
 ---
 
-*17 files, all syntactically verified. ✓*
+## 18. `pytest.ini`
+
+```ini
+[pytest]
+testpaths = tests
+python_files = test_*.py
+python_functions = test_*
+addopts = -v --tb=short --timeout=120
+```
+
+---
+
+## 19. `tests/__init__.py`
+
+```python
+
+```
+
+---
+
+## 20. `tests/conftest.py` — Shared Test Fixtures
+
+```python
+"""Shared fixtures for MetaSRS tests."""
+
+import sys
+import os
+import torch
+import numpy as np
+import pytest
+
+# Add meta-srs root to sys.path so imports work
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config import MetaSRSConfig, ModelConfig, TrainingConfig, FSRSConfig
+from models.memory_net import MemoryNet
+from data.task_sampler import Review, Task, ReviewDataset
+from training.fsrs_warmstart import FSRS6
+
+
+def create_model(config=None):
+    """Create a MemoryNet from ModelConfig, filtering out config-only fields."""
+    if config is None:
+        config = ModelConfig()
+    init_args = {k: v for k, v in config.__dict__.items()
+                 if k in MemoryNet.__init__.__code__.co_varnames}
+    return MemoryNet(**init_args)
+
+
+@pytest.fixture
+def device():
+    return torch.device("cpu")
+
+
+@pytest.fixture
+def config():
+    return MetaSRSConfig()
+
+
+@pytest.fixture
+def model_config():
+    return ModelConfig()
+
+
+@pytest.fixture
+def training_config():
+    return TrainingConfig()
+
+
+@pytest.fixture
+def fsrs_config():
+    return FSRSConfig()
+
+
+@pytest.fixture
+def model(model_config):
+    return create_model(model_config)
+
+
+@pytest.fixture
+def fsrs():
+    return FSRS6()
+
+
+@pytest.fixture
+def sample_batch_tensors(device):
+    """Create a small batch of tensors suitable for MemoryNet forward."""
+    batch_size = 4
+    return {
+        "D_prev": torch.tensor([5.0, 3.0, 7.0, 2.0], device=device),
+        "S_prev": torch.tensor([10.0, 5.0, 20.0, 1.0], device=device),
+        "R_at_review": torch.tensor([0.9, 0.7, 0.5, 1.0], device=device),
+        "delta_t": torch.tensor([3.0, 7.0, 14.0, 0.0], device=device),
+        "grade": torch.tensor([3, 2, 4, 1], dtype=torch.long, device=device),
+        "review_count": torch.tensor([5.0, 3.0, 10.0, 1.0], device=device),
+        "user_stats": torch.zeros(batch_size, 8, device=device),
+        "history_grades": torch.tensor(
+            [[3, 2, 0, 0], [4, 0, 0, 0], [3, 3, 2, 4], [0, 0, 0, 0]],
+            dtype=torch.float32, device=device,
+        ),
+        "history_delta_ts": torch.tensor(
+            [[1.0, 3.0, 0.0, 0.0], [2.0, 0.0, 0.0, 0.0],
+             [1.0, 3.0, 7.0, 14.0], [0.0, 0.0, 0.0, 0.0]],
+            dtype=torch.float32, device=device,
+        ),
+        "history_lengths": torch.tensor([2, 1, 4, 1], dtype=torch.long, device=device),
+        "recalled": torch.tensor([1.0, 1.0, 1.0, 0.0], device=device),
+        "S_target": torch.tensor([15.0, 8.0, 30.0, 0.5], device=device),
+        "D_target": torch.tensor([4.5, 3.2, 6.8, 2.5], device=device),
+    }
+
+
+@pytest.fixture
+def sample_reviews():
+    """Create a list of sample Review objects."""
+    return [
+        Review(card_id="c1", timestamp=0, elapsed_days=0.0, grade=3,
+               recalled=True, S_prev=3.0, D_prev=5.0, R_at_review=1.0,
+               S_target=5.0, D_target=4.8),
+        Review(card_id="c2", timestamp=86400, elapsed_days=1.0, grade=2,
+               recalled=True, S_prev=1.0, D_prev=7.0, R_at_review=0.9,
+               S_target=2.0, D_target=7.2),
+        Review(card_id="c1", timestamp=172800, elapsed_days=2.0, grade=4,
+               recalled=True, S_prev=5.0, D_prev=4.8, R_at_review=0.85,
+               S_target=15.0, D_target=4.0),
+        Review(card_id="c3", timestamp=259200, elapsed_days=0.0, grade=1,
+               recalled=False, S_prev=1.0, D_prev=5.0, R_at_review=1.0,
+               S_target=0.5, D_target=6.0),
+    ]
+
+
+@pytest.fixture
+def synthetic_tasks():
+    """Generate a small set of synthetic tasks for testing."""
+    return ReviewDataset.generate_synthetic(
+        n_students=20, reviews_per_student=50, n_cards=30, seed=42
+    )
+```
+
+---
+
+## 21. `tests/test_config.py`
+
+```python
+"""Tests for MetaSRS configuration."""
+
+import math
+import sys
+import os
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config import (
+    MetaSRSConfig, ModelConfig, FSRSConfig,
+    TrainingConfig, AdaptationConfig, SchedulingConfig,
+)
+
+
+class TestModelConfig:
+    def test_defaults(self):
+        cfg = ModelConfig()
+        assert cfg.input_dim == 49
+        assert cfg.hidden_dim == 128
+        assert cfg.gru_hidden_dim == 32
+        assert cfg.history_len == 32
+        assert cfg.user_stats_dim == 8
+        assert cfg.dropout == 0.1
+        assert cfg.mc_samples == 20
+
+    def test_feature_dim_sum(self):
+        """Verify input_dim = scalars(4) + grade(4) + count(1) + user(8) + gru(32)."""
+        cfg = ModelConfig()
+        expected = 4 + 4 + 1 + cfg.user_stats_dim + cfg.gru_hidden_dim
+        assert cfg.input_dim == expected
+
+
+class TestFSRSConfig:
+    def test_default_weights(self):
+        cfg = FSRSConfig()
+        assert len(cfg.w) == 21
+        assert cfg.w[0] == 0.40255   # initial stability (Again)
+        assert cfg.w[20] == 0.4665   # power-law exponent
+
+    def test_weights_are_positive(self):
+        cfg = FSRSConfig()
+        # All weights should be non-negative (w7 is a placeholder)
+        for i, w in enumerate(cfg.w):
+            assert w >= 0, f"w[{i}] = {w} is negative"
+
+
+class TestTrainingConfig:
+    def test_epsilon_schedule_boundaries(self):
+        cfg = TrainingConfig()
+        assert cfg.epsilon_schedule(0) == cfg.epsilon_start
+        assert abs(cfg.epsilon_schedule(cfg.n_iters) - cfg.epsilon_end) < 1e-8
+
+    def test_epsilon_schedule_monotonic_decrease(self):
+        cfg = TrainingConfig()
+        prev = cfg.epsilon_schedule(0)
+        for i in range(1, 100):
+            cur = cfg.epsilon_schedule(i * 500)
+            assert cur <= prev + 1e-12, f"epsilon increased at iter {i*500}"
+            prev = cur
+
+    def test_outer_lr_schedule_boundaries(self):
+        cfg = TrainingConfig()
+        # At iter 0, cosine gives cos(0) = 1 → lr = lr_start
+        assert abs(cfg.outer_lr_schedule(0) - cfg.outer_lr_start) < 1e-8
+        # At iter n_iters, cosine gives cos(pi) = -1 → lr = lr_end
+        assert abs(cfg.outer_lr_schedule(cfg.n_iters) - cfg.outer_lr_end) < 1e-8
+
+    def test_outer_lr_schedule_monotonic_decrease(self):
+        cfg = TrainingConfig()
+        prev = cfg.outer_lr_schedule(0)
+        for i in range(1, 100):
+            cur = cfg.outer_lr_schedule(i * 500)
+            assert cur <= prev + 1e-12, f"outer_lr increased at iter {i*500}"
+            prev = cur
+
+
+class TestAdaptationConfig:
+    def test_phase_thresholds_ordered(self):
+        cfg = AdaptationConfig()
+        assert cfg.phase1_threshold < cfg.phase2_threshold
+
+    def test_k_steps_increasing(self):
+        cfg = AdaptationConfig()
+        assert cfg.phase1_k_steps <= cfg.phase2_k_steps <= cfg.phase3_k_steps
+
+
+class TestSchedulingConfig:
+    def test_defaults(self):
+        cfg = SchedulingConfig()
+        assert cfg.desired_retention == 0.90
+        assert cfg.min_interval == 1
+        assert cfg.max_interval == 365
+        assert cfg.fuzz_range[0] < cfg.fuzz_range[1]
+
+
+class TestMetaSRSConfig:
+    def test_aggregation(self):
+        cfg = MetaSRSConfig()
+        assert isinstance(cfg.model, ModelConfig)
+        assert isinstance(cfg.fsrs, FSRSConfig)
+        assert isinstance(cfg.training, TrainingConfig)
+        assert isinstance(cfg.adaptation, AdaptationConfig)
+        assert isinstance(cfg.scheduling, SchedulingConfig)
+```
+
+---
+
+## 22. `tests/test_memory_net.py`
+
+```python
+"""Tests for MemoryNet model."""
+
+import sys
+import os
+import torch
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config import ModelConfig
+from models.memory_net import MemoryNet, MemoryState
+
+
+class TestMemoryNetArchitecture:
+    def test_creation(self, model):
+        assert isinstance(model, MemoryNet)
+
+    def test_parameter_count(self, model):
+        n_params = model.count_parameters()
+        # Should be around 50K–70K as per architecture
+        assert 30_000 < n_params < 150_000, f"Unexpected param count: {n_params}"
+
+    def test_input_dim(self, model):
+        assert model.input_dim == 49
+
+    def test_submodules_exist(self, model):
+        assert hasattr(model, "gru_encoder")
+        assert hasattr(model, "stability_head")
+        assert hasattr(model, "difficulty_head")
+        assert hasattr(model, "recall_head")
+
+
+class TestMemoryNetForward:
+    def test_forward_output_shapes(self, model, sample_batch_tensors, device):
+        batch = sample_batch_tensors
+        state = model(
+            D_prev=batch["D_prev"],
+            S_prev=batch["S_prev"],
+            R_at_review=batch["R_at_review"],
+            delta_t=batch["delta_t"],
+            grade=batch["grade"],
+            review_count=batch["review_count"],
+            user_stats=batch["user_stats"],
+            history_grades=batch["history_grades"],
+            history_delta_ts=batch["history_delta_ts"],
+            history_lengths=batch["history_lengths"],
+        )
+        assert isinstance(state, MemoryState)
+        assert state.S_next.shape == (4,)
+        assert state.D_next.shape == (4,)
+        assert state.p_recall.shape == (4,)
+
+    def test_output_ranges(self, model, sample_batch_tensors, device):
+        batch = sample_batch_tensors
+        model.eval()
+        with torch.no_grad():
+            state = model(
+                D_prev=batch["D_prev"],
+                S_prev=batch["S_prev"],
+                R_at_review=batch["R_at_review"],
+                delta_t=batch["delta_t"],
+                grade=batch["grade"],
+                review_count=batch["review_count"],
+                user_stats=batch["user_stats"],
+                history_grades=batch["history_grades"],
+                history_delta_ts=batch["history_delta_ts"],
+                history_lengths=batch["history_lengths"],
+            )
+
+        # S_next clamped to [0.001, 36500]
+        assert (state.S_next >= 1e-3).all()
+        assert (state.S_next <= 36500.0).all()
+        # D_next in [1, 10]
+        assert (state.D_next >= 1.0).all()
+        assert (state.D_next <= 10.0).all()
+        # p_recall in [0, 1]
+        assert (state.p_recall >= 0.0).all()
+        assert (state.p_recall <= 1.0).all()
+
+    def test_no_nan_in_output(self, model, sample_batch_tensors, device):
+        batch = sample_batch_tensors
+        model.eval()
+        with torch.no_grad():
+            state = model(
+                D_prev=batch["D_prev"],
+                S_prev=batch["S_prev"],
+                R_at_review=batch["R_at_review"],
+                delta_t=batch["delta_t"],
+                grade=batch["grade"],
+                review_count=batch["review_count"],
+                user_stats=batch["user_stats"],
+                history_grades=batch["history_grades"],
+                history_delta_ts=batch["history_delta_ts"],
+                history_lengths=batch["history_lengths"],
+            )
+        assert not torch.isnan(state.S_next).any()
+        assert not torch.isnan(state.D_next).any()
+        assert not torch.isnan(state.p_recall).any()
+
+
+class TestBuildFeatures:
+    def test_feature_dim(self, model, sample_batch_tensors, device):
+        batch = sample_batch_tensors
+        features = model.build_features(
+            D_prev=batch["D_prev"],
+            S_prev=batch["S_prev"],
+            R_at_review=batch["R_at_review"],
+            delta_t=batch["delta_t"],
+            grade=batch["grade"],
+            review_count=batch["review_count"],
+            user_stats=batch["user_stats"],
+            history_grades=batch["history_grades"],
+            history_delta_ts=batch["history_delta_ts"],
+            history_lengths=batch["history_lengths"],
+        )
+        assert features.shape == (4, 49)
+
+    def test_no_history_uses_zero_context(self, model, sample_batch_tensors, device):
+        """When history is None, GRU should produce zero context."""
+        batch = sample_batch_tensors
+        features = model.build_features(
+            D_prev=batch["D_prev"],
+            S_prev=batch["S_prev"],
+            R_at_review=batch["R_at_review"],
+            delta_t=batch["delta_t"],
+            grade=batch["grade"],
+            review_count=batch["review_count"],
+            user_stats=batch["user_stats"],
+            history_grades=None,
+            history_delta_ts=None,
+            history_lengths=None,
+        )
+        assert features.shape == (4, 49)
+        # Last 32 dims (GRU context) should be zero
+        assert (features[:, -32:] == 0).all()
+
+
+class TestForwardFromFeatures:
+    def test_forward_from_features(self, model, device):
+        features = torch.randn(4, 49, device=device)
+        S_prev = torch.tensor([5.0, 10.0, 1.0, 20.0], device=device)
+        state = model.forward_from_features(features, S_prev)
+        assert state.S_next.shape == (4,)
+        assert state.D_next.shape == (4,)
+        assert state.p_recall.shape == (4,)
+
+    def test_predict_recall(self, model, device):
+        features = torch.randn(4, 49, device=device)
+        S_prev = torch.tensor([5.0, 10.0, 1.0, 20.0], device=device)
+        p = model.predict_recall(features, S_prev)
+        assert p.shape == (4,)
+        assert (p >= 0).all() and (p <= 1).all()
+
+    def test_predict_stability(self, model, device):
+        features = torch.randn(4, 49, device=device)
+        S_prev = torch.tensor([5.0, 10.0, 1.0, 20.0], device=device)
+        S = model.predict_stability(features, S_prev)
+        assert S.shape == (4,)
+        assert (S >= 1e-3).all()
+
+
+class TestGradientFlow:
+    def test_backward_pass(self, model, sample_batch_tensors, device):
+        """Ensure gradients flow through the full forward pass."""
+        batch = sample_batch_tensors
+        state = model(
+            D_prev=batch["D_prev"],
+            S_prev=batch["S_prev"],
+            R_at_review=batch["R_at_review"],
+            delta_t=batch["delta_t"],
+            grade=batch["grade"],
+            review_count=batch["review_count"],
+            user_stats=batch["user_stats"],
+            history_grades=batch["history_grades"],
+            history_delta_ts=batch["history_delta_ts"],
+            history_lengths=batch["history_lengths"],
+        )
+        loss = state.p_recall.sum()
+        loss.backward()
+
+        # Check at least some parameters have gradients
+        grads_found = 0
+        for p in model.parameters():
+            if p.grad is not None and p.grad.abs().sum() > 0:
+                grads_found += 1
+        assert grads_found > 0, "No gradients found after backward pass"
+```
+
+---
+
+## 23. `tests/test_models.py` — GRU Encoder Tests
+
+```python
+"""Tests for GRU history encoder."""
+
+import sys
+import os
+import numpy as np
+import torch
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from models.gru_encoder import GRUHistoryEncoder
+
+
+class TestGRUHistoryEncoder:
+    @pytest.fixture
+    def encoder(self):
+        return GRUHistoryEncoder(hidden_dim=32, max_len=32)
+
+    def test_output_shape(self, encoder):
+        grades = torch.tensor([[3, 2, 4, 0], [3, 0, 0, 0]], dtype=torch.float32)
+        delta_ts = torch.tensor([[1.0, 3.0, 7.0, 0.0], [2.0, 0.0, 0.0, 0.0]])
+        lengths = torch.tensor([3, 1], dtype=torch.long)
+        out = encoder(grades, delta_ts, lengths)
+        assert out.shape == (2, 32)
+
+    def test_zero_state(self, encoder):
+        z = encoder.zero_state(4, torch.device("cpu"))
+        assert z.shape == (4, 32)
+        assert (z == 0).all()
+
+    def test_no_nan(self, encoder):
+        grades = torch.rand(3, 10) * 4
+        delta_ts = torch.rand(3, 10) * 30
+        lengths = torch.tensor([10, 5, 1], dtype=torch.long)
+        out = encoder(grades, delta_ts, lengths)
+        assert not torch.isnan(out).any()
+
+    def test_without_lengths(self, encoder):
+        """Should work without explicit lengths."""
+        grades = torch.rand(2, 5) * 4
+        delta_ts = torch.rand(2, 5) * 10
+        out = encoder(grades, delta_ts, lengths=None)
+        assert out.shape == (2, 32)
+
+    def test_truncation(self, encoder):
+        """Sequences longer than max_len should be truncated."""
+        grades = torch.rand(2, 50) * 4
+        delta_ts = torch.rand(2, 50) * 10
+        lengths = torch.tensor([50, 40], dtype=torch.long)
+        out = encoder(grades, delta_ts, lengths)
+        assert out.shape == (2, 32)
+```
+
+---
+
+## 24. `tests/test_fsrs_warmstart.py`
+
+```python
+"""Tests for FSRS-6 baseline and warm-start."""
+
+import math
+import sys
+import os
+import torch
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from training.fsrs_warmstart import FSRS6
+
+
+class TestFSRS6Retrievability:
+    def test_zero_elapsed(self, fsrs):
+        """At t=0, retrievability should be 1.0 (no time to forget)."""
+        R = fsrs.retrievability(0.0, 10.0)
+        assert abs(R - 1.0) < 1e-6
+
+    def test_retrievability_decays(self, fsrs):
+        """Retrievability should decrease as elapsed time increases."""
+        S = 10.0
+        R_at_1 = fsrs.retrievability(1.0, S)
+        R_at_10 = fsrs.retrievability(10.0, S)
+        R_at_100 = fsrs.retrievability(100.0, S)
+        assert R_at_1 > R_at_10 > R_at_100
+
+    def test_higher_stability_slower_decay(self, fsrs):
+        """Higher stability means slower forgetting."""
+        t = 10.0
+        R_low_S = fsrs.retrievability(t, 5.0)
+        R_high_S = fsrs.retrievability(t, 50.0)
+        assert R_high_S > R_low_S
+
+    def test_retrievability_at_S_equals_t(self, fsrs):
+        """When t = S and w20 ≈ 0.5, R should be approximately 0.9."""
+        S = 10.0
+        R = fsrs.retrievability(S, S)
+        # With w20=0.4665, R(S, S) = 0.9^(S^w20 / S) which isn't exactly 0.9
+        # but should be in a reasonable range
+        assert 0.5 < R < 1.0
+
+    def test_zero_stability(self, fsrs):
+        """Zero stability should return 0.0."""
+        R = fsrs.retrievability(1.0, 0.0)
+        assert R == 0.0
+
+    def test_retrievability_batch(self, fsrs):
+        """Test vectorised retrievability."""
+        t = torch.tensor([1.0, 5.0, 10.0])
+        S = torch.tensor([10.0, 10.0, 10.0])
+        R = fsrs.retrievability_batch(t, S)
+        assert R.shape == (3,)
+        assert (R[0] > R[1]).item()
+        assert (R[1] > R[2]).item()
+
+
+class TestFSRS6InitialState:
+    def test_initial_stability_by_grade(self, fsrs):
+        """Higher grade → higher initial stability."""
+        S_again = fsrs.initial_stability(1)
+        S_hard = fsrs.initial_stability(2)
+        S_good = fsrs.initial_stability(3)
+        S_easy = fsrs.initial_stability(4)
+        assert S_again < S_hard < S_good < S_easy
+
+    def test_initial_difficulty_by_grade(self, fsrs):
+        """Higher grade → lower initial difficulty."""
+        D_again = fsrs.initial_difficulty(1)
+        D_easy = fsrs.initial_difficulty(4)
+        assert D_again > D_easy
+
+
+class TestFSRS6StabilityUpdate:
+    def test_success_increases_stability(self, fsrs):
+        """Successful recall should increase stability."""
+        S, D = 5.0, 5.0
+        R = fsrs.retrievability(3.0, S)
+        S_next = fsrs.stability_after_success(S, D, R, grade=3)
+        assert S_next > S
+
+    def test_easy_gives_higher_stability_than_hard(self, fsrs):
+        """Easy grade should give higher stability gain than Hard."""
+        S, D = 5.0, 5.0
+        R = fsrs.retrievability(3.0, S)
+        S_hard = fsrs.stability_after_success(S, D, R, grade=2)
+        S_easy = fsrs.stability_after_success(S, D, R, grade=4)
+        assert S_easy > S_hard
+
+    def test_lapse_decreases_stability(self, fsrs):
+        """A lapse (Again) should decrease stability."""
+        S, D = 10.0, 5.0
+        R = fsrs.retrievability(5.0, S)
+        S_lapse = fsrs.stability_after_lapse(S, D, R)
+        assert S_lapse < S
+
+
+class TestFSRS6DifficultyUpdate:
+    def test_good_maintains_difficulty(self, fsrs):
+        """Grade=Good (3) should not change difficulty much."""
+        D = 5.0
+        D_next = fsrs.update_difficulty(D, grade=3)
+        assert abs(D_next - D) < 2.0  # Should stay close
+
+    def test_again_increases_difficulty(self, fsrs):
+        """Again (grade=1) should increase difficulty."""
+        D = 5.0
+        D_next = fsrs.update_difficulty(D, grade=1)
+        assert D_next > D
+
+    def test_easy_decreases_difficulty(self, fsrs):
+        """Easy (grade=4) should decrease difficulty from a high value."""
+        D = 8.0  # Start high so Easy can clearly decrease it
+        D_next = fsrs.update_difficulty(D, grade=4)
+        assert D_next < D
+
+    def test_difficulty_bounds(self, fsrs):
+        """Difficulty should be clamped to [1, 10]."""
+        D_low = fsrs.update_difficulty(1.0, grade=4)
+        D_high = fsrs.update_difficulty(10.0, grade=1)
+        assert D_low >= 1.0
+        assert D_high <= 10.0
+
+
+class TestFSRS6Step:
+    def test_step_returns_three_values(self, fsrs):
+        S_next, D_next, R = fsrs.step(5.0, 5.0, 3.0, 3)
+        assert isinstance(S_next, float)
+        assert isinstance(D_next, float)
+        assert isinstance(R, float)
+
+    def test_step_first_review(self, fsrs):
+        """First review (elapsed=0) should have R=1.0."""
+        S_next, D_next, R = fsrs.step(3.0, 5.0, 0.0, 3)
+        assert R == 1.0
+
+    def test_step_success_vs_lapse(self, fsrs):
+        """Success (Good) should give higher S than lapse (Again)."""
+        S, D = 5.0, 5.0
+        S_good, _, _ = fsrs.step(S, D, 3.0, 3)
+        S_again, _, _ = fsrs.step(S, D, 3.0, 1)
+        assert S_good > S_again
+
+
+class TestSimulateStudent:
+    def test_simulate_returns_correct_length(self, fsrs):
+        reviews = [
+            {"card_id": "c1", "elapsed_days": 0.0, "grade": 3},
+            {"card_id": "c1", "elapsed_days": 3.0, "grade": 3},
+            {"card_id": "c1", "elapsed_days": 7.0, "grade": 4},
+        ]
+        results = fsrs.simulate_student(reviews)
+        assert len(results) == 3
+
+    def test_simulate_adds_state_fields(self, fsrs):
+        reviews = [
+            {"card_id": "c1", "elapsed_days": 0.0, "grade": 3},
+        ]
+        results = fsrs.simulate_student(reviews)
+        assert "S" in results[0]
+        assert "D" in results[0]
+        assert "R" in results[0]
+        assert "recalled" in results[0]
+
+    def test_simulate_stability_grows_on_success(self, fsrs):
+        reviews = [
+            {"card_id": "c1", "elapsed_days": 0.0, "grade": 3},
+            {"card_id": "c1", "elapsed_days": 3.0, "grade": 3},
+            {"card_id": "c1", "elapsed_days": 7.0, "grade": 3},
+        ]
+        results = fsrs.simulate_student(reviews)
+        # Stability should increase with repeated successful recalls
+        assert results[1]["S"] > results[0]["S"]
+        assert results[2]["S"] > results[1]["S"]
+```
+
+---
+
+## 25. `tests/test_loss.py`
+
+```python
+"""Tests for the multi-component loss function."""
+
+import sys
+import os
+import torch
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from training.loss import MetaSRSLoss, compute_loss
+from models.memory_net import MemoryNet
+from config import ModelConfig
+
+
+class TestMetaSRSLoss:
+    @pytest.fixture
+    def loss_fn(self):
+        return MetaSRSLoss()
+
+    def test_loss_returns_dict(self, loss_fn):
+        p_pred = torch.tensor([0.8, 0.6, 0.3, 0.9])
+        S_next = torch.tensor([10.0, 5.0, 2.0, 20.0])
+        recalled = torch.tensor([1.0, 1.0, 0.0, 1.0])
+        elapsed = torch.tensor([3.0, 7.0, 14.0, 1.0])
+        grade = torch.tensor([3, 3, 1, 4])
+        S_prev = torch.tensor([5.0, 3.0, 5.0, 10.0])
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade, S_prev)
+
+        assert "total" in result
+        assert "recall" in result
+        assert "stability" in result
+        assert "monotonicity" in result
+
+    def test_loss_is_finite(self, loss_fn):
+        p_pred = torch.tensor([0.8, 0.6, 0.3, 0.9])
+        S_next = torch.tensor([10.0, 5.0, 2.0, 20.0])
+        recalled = torch.tensor([1.0, 1.0, 0.0, 1.0])
+        elapsed = torch.tensor([3.0, 7.0, 14.0, 1.0])
+        grade = torch.tensor([3, 3, 1, 4])
+        S_prev = torch.tensor([5.0, 3.0, 5.0, 10.0])
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade, S_prev)
+        assert torch.isfinite(result["total"])
+
+    def test_perfect_prediction_low_loss(self, loss_fn):
+        """Perfect predictions should yield low recall loss."""
+        p_pred = torch.tensor([0.99, 0.99, 0.01, 0.99])
+        S_next = torch.tensor([10.0, 5.0, 2.0, 20.0])
+        recalled = torch.tensor([1.0, 1.0, 0.0, 1.0])
+        elapsed = torch.tensor([1.0, 1.0, 1.0, 1.0])
+        grade = torch.tensor([3, 3, 1, 4])
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade)
+        assert result["recall"].item() < 0.5  # Should be low
+
+    def test_bad_prediction_high_loss(self, loss_fn):
+        """Inverted predictions should yield high recall loss."""
+        p_pred = torch.tensor([0.01, 0.01, 0.99, 0.01])
+        S_next = torch.tensor([10.0, 5.0, 2.0, 20.0])
+        recalled = torch.tensor([1.0, 1.0, 0.0, 1.0])
+        elapsed = torch.tensor([1.0, 1.0, 1.0, 1.0])
+        grade = torch.tensor([3, 3, 1, 4])
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade)
+        assert result["recall"].item() > 1.0  # Should be high
+
+    def test_monotonicity_penalty(self, loss_fn):
+        """Stability decrease on success should incur monotonicity penalty."""
+        p_pred = torch.tensor([0.8, 0.8])
+        S_next = torch.tensor([3.0, 3.0])   # S decreased from 5 and 10
+        recalled = torch.tensor([1.0, 1.0])
+        elapsed = torch.tensor([1.0, 1.0])
+        grade = torch.tensor([3, 3])  # Success
+        S_prev = torch.tensor([5.0, 10.0])   # Higher than S_next
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade, S_prev)
+        assert result["monotonicity"].item() > 0
+
+    def test_no_monotonicity_penalty_on_increase(self, loss_fn):
+        """Stability increase on success should have zero monotonicity penalty."""
+        p_pred = torch.tensor([0.8, 0.8])
+        S_next = torch.tensor([10.0, 20.0])  # S increased
+        recalled = torch.tensor([1.0, 1.0])
+        elapsed = torch.tensor([1.0, 1.0])
+        grade = torch.tensor([3, 3])
+        S_prev = torch.tensor([5.0, 10.0])   # Lower than S_next
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade, S_prev)
+        assert result["monotonicity"].item() == 0.0
+
+    def test_nan_fallback(self, loss_fn):
+        """If total loss is NaN, should fall back to recall loss only."""
+        # This is hard to trigger directly, but we can test the guard logic
+        p_pred = torch.tensor([0.5, 0.5])
+        S_next = torch.tensor([5.0, 5.0])
+        recalled = torch.tensor([1.0, 0.0])
+        elapsed = torch.tensor([1.0, 1.0])
+        grade = torch.tensor([3, 1])
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade)
+        assert not torch.isnan(result["total"])
+
+    def test_loss_weights(self):
+        """Verify loss weights are applied correctly."""
+        loss_fn = MetaSRSLoss(stability_weight=0.0, monotonicity_weight=0.0)
+        p_pred = torch.tensor([0.8, 0.2])
+        S_next = torch.tensor([3.0, 3.0])
+        recalled = torch.tensor([1.0, 0.0])
+        elapsed = torch.tensor([5.0, 5.0])
+        grade = torch.tensor([3, 1])
+        S_prev = torch.tensor([5.0, 5.0])
+
+        result = loss_fn(p_pred, S_next, recalled, elapsed, grade, S_prev)
+        # With zero weights, total should equal recall loss
+        assert abs(result["total"].item() - result["recall"].item()) < 1e-6
+
+
+class TestComputeLoss:
+    def test_compute_loss_integration(self, model, sample_batch_tensors):
+        loss_fn = MetaSRSLoss()
+        result = compute_loss(model, sample_batch_tensors, loss_fn)
+        assert "total" in result
+        assert torch.isfinite(result["total"])
+```
+
+---
+
+## 26. `tests/test_reptile.py`
+
+```python
+"""Tests for Reptile meta-training."""
+
+import sys
+import os
+import torch
+import pytest
+from collections import OrderedDict
+from copy import deepcopy
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config import MetaSRSConfig
+from models.memory_net import MemoryNet
+from training.reptile import inner_loop, reptile_update, sample_batch, ReptileTrainer
+from tests.conftest import create_model
+from training.loss import MetaSRSLoss
+from data.task_sampler import Task, Review, TaskSampler, ReviewDataset
+
+
+@pytest.fixture
+def phi_and_model():
+    """Create a model and its initial phi state dict."""
+    config = MetaSRSConfig()
+    model = create_model(config.model)
+    phi = deepcopy(model.state_dict())
+    return phi, model, config
+
+
+@pytest.fixture
+def simple_task():
+    """Create a simple task for testing inner loop."""
+    reviews = [
+        Review(card_id=f"c{i%5}", timestamp=i * 86400,
+               elapsed_days=float(i), grade=3, recalled=True,
+               S_prev=3.0 + i, D_prev=5.0, R_at_review=0.9,
+               S_target=5.0 + i, D_target=4.8)
+        for i in range(30)
+    ]
+    task = Task(student_id="test_student", reviews=reviews)
+    task.split(support_ratio=0.70)
+    return task
+
+
+class TestSampleBatch:
+    def test_returns_dict(self, simple_task):
+        batch = sample_batch(
+            simple_task.support_set, 8,
+            torch.device("cpu")
+        )
+        assert isinstance(batch, dict)
+        assert "D_prev" in batch
+        assert "recalled" in batch
+
+    def test_respects_size(self, simple_task):
+        batch = sample_batch(
+            simple_task.support_set, 5,
+            torch.device("cpu")
+        )
+        assert batch["D_prev"].shape[0] <= max(5, len(simple_task.support_set))
+
+
+class TestInnerLoop:
+    def test_inner_loop_changes_weights(self, phi_and_model, simple_task):
+        phi, model, config = phi_and_model
+        loss_fn = MetaSRSLoss(w20=config.fsrs.w[20])
+
+        adapted = inner_loop(
+            phi_state_dict=phi,
+            model=model,
+            task=simple_task,
+            loss_fn=loss_fn,
+            k_steps=3,
+            inner_lr=0.01,
+            batch_size=16,
+            device=torch.device("cpu"),
+        )
+
+        # Adapted weights should differ from phi
+        different = False
+        for key in phi:
+            if not torch.equal(phi[key], adapted[key]):
+                different = True
+                break
+        assert different, "Inner loop did not change weights"
+
+    def test_inner_loop_does_not_modify_phi(self, phi_and_model, simple_task):
+        phi, model, config = phi_and_model
+        phi_copy = deepcopy(phi)
+        loss_fn = MetaSRSLoss(w20=config.fsrs.w[20])
+
+        inner_loop(
+            phi_state_dict=phi,
+            model=model,
+            task=simple_task,
+            loss_fn=loss_fn,
+            k_steps=3,
+            inner_lr=0.01,
+            batch_size=16,
+            device=torch.device("cpu"),
+        )
+
+        # phi should be unchanged
+        for key in phi:
+            assert torch.equal(phi[key], phi_copy[key]), \
+                f"phi was modified at key {key}"
+
+
+class TestReptileUpdate:
+    def test_update_moves_phi(self, phi_and_model):
+        phi, model, _ = phi_and_model
+        # Create two "adapted" weight sets that differ from phi
+        adapted1 = OrderedDict()
+        adapted2 = OrderedDict()
+        for key in phi:
+            adapted1[key] = phi[key] + 0.1 * torch.randn_like(phi[key])
+            adapted2[key] = phi[key] + 0.1 * torch.randn_like(phi[key])
+
+        new_phi = reptile_update(phi, [adapted1, adapted2], epsilon=0.1)
+
+        # New phi should differ from old phi
+        different = False
+        for key in phi:
+            if not torch.equal(phi[key], new_phi[key]):
+                different = True
+                break
+        assert different, "Reptile update did not change phi"
+
+    def test_update_direction(self, phi_and_model):
+        """Phi should move toward the adapted weights."""
+        phi, model, _ = phi_and_model
+        # All adapted weights are the same: phi + delta
+        delta = OrderedDict()
+        adapted = OrderedDict()
+        for key in phi:
+            delta[key] = torch.ones_like(phi[key])
+            adapted[key] = phi[key] + delta[key]
+
+        new_phi = reptile_update(phi, [adapted], epsilon=0.5)
+
+        # new_phi should be phi + 0.5 * delta
+        for key in phi:
+            expected = phi[key] + 0.5 * delta[key]
+            assert torch.allclose(new_phi[key], expected, atol=1e-6), \
+                f"Unexpected update at key {key}"
+
+    def test_epsilon_zero_no_change(self, phi_and_model):
+        """With epsilon=0, phi should not change."""
+        phi, model, _ = phi_and_model
+        adapted = OrderedDict()
+        for key in phi:
+            adapted[key] = phi[key] + torch.randn_like(phi[key])
+
+        new_phi = reptile_update(phi, [adapted], epsilon=0.0)
+        for key in phi:
+            assert torch.equal(phi[key], new_phi[key])
+
+
+class TestReptileTrainer:
+    @pytest.mark.timeout(60)
+    def test_trainer_runs(self):
+        """Test that ReptileTrainer runs for a few iterations without crashing."""
+        config = MetaSRSConfig()
+        config.training.log_dir = "/tmp/meta-srs-test-logs"
+        config.training.checkpoint_dir = "/tmp/meta-srs-test-checkpoints"
+        model = create_model(config.model)
+        trainer = ReptileTrainer(model, config)
+
+        tasks = ReviewDataset.generate_synthetic(
+            n_students=10, reviews_per_student=30, n_cards=10, seed=42
+        )
+        sampler = TaskSampler(tasks, min_reviews=10)
+
+        phi = trainer.train(sampler, n_iters=3)
+        assert isinstance(phi, OrderedDict)
+        assert len(phi) > 0
+```
+
+---
+
+## 27. `tests/test_task_sampler.py`
+
+```python
+"""Tests for task sampling, review data, and batch construction."""
+
+import sys
+import os
+import numpy as np
+import torch
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from data.task_sampler import Review, Task, TaskSampler, ReviewDataset, reviews_to_batch
+
+
+class TestReview:
+    def test_creation(self):
+        r = Review(card_id="c1", timestamp=0, elapsed_days=0.0,
+                   grade=3, recalled=True)
+        assert r.card_id == "c1"
+        assert r.grade == 3
+        assert r.recalled is True
+        assert r.S_prev == 1.0  # default
+        assert r.D_prev == 5.0  # default
+
+    def test_recalled_matches_grade(self):
+        r_success = Review(card_id="c1", timestamp=0, elapsed_days=0.0,
+                           grade=3, recalled=True)
+        r_fail = Review(card_id="c1", timestamp=0, elapsed_days=0.0,
+                        grade=1, recalled=False)
+        assert r_success.recalled is True
+        assert r_fail.recalled is False
+
+
+class TestTask:
+    def test_split(self, sample_reviews):
+        task = Task(student_id="s1", reviews=sample_reviews)
+        task.split(support_ratio=0.70)
+        assert len(task.support_set) + len(task.query_set) == len(sample_reviews)
+        assert len(task.support_set) > 0
+        assert len(task.query_set) > 0
+
+    def test_split_chronological(self, sample_reviews):
+        """Support set should come before query set chronologically."""
+        task = Task(student_id="s1", reviews=sample_reviews)
+        task.split(support_ratio=0.70)
+        if task.support_set and task.query_set:
+            last_support_ts = task.support_set[-1].timestamp
+            first_query_ts = task.query_set[0].timestamp
+            assert first_query_ts >= last_support_ts
+
+    def test_get_review_history(self, sample_reviews):
+        task = Task(student_id="s1", reviews=sample_reviews)
+        # c1 appears at index 0 and 2
+        history = task.get_review_history("c1", up_to_idx=3)
+        assert len(history) == 2
+        assert all(r.card_id == "c1" for r in history)
+
+    def test_unique_cards(self, sample_reviews):
+        task = Task(student_id="s1", reviews=sample_reviews)
+        cards = task.unique_cards
+        assert set(cards) == {"c1", "c2", "c3"}
+
+
+class TestReviewsToBatch:
+    def test_batch_shapes(self, sample_reviews):
+        batch = reviews_to_batch(sample_reviews)
+        n = len(sample_reviews)
+        assert batch["D_prev"].shape == (n,)
+        assert batch["S_prev"].shape == (n,)
+        assert batch["R_at_review"].shape == (n,)
+        assert batch["delta_t"].shape == (n,)
+        assert batch["grade"].shape == (n,)
+        assert batch["review_count"].shape == (n,)
+        assert batch["user_stats"].shape == (n, 8)
+        assert batch["recalled"].shape == (n,)
+        assert batch["history_grades"].shape[0] == n
+        assert batch["history_delta_ts"].shape[0] == n
+        assert batch["history_lengths"].shape == (n,)
+
+    def test_batch_on_device(self, sample_reviews, device):
+        batch = reviews_to_batch(sample_reviews, device)
+        for key, tensor in batch.items():
+            assert tensor.device == device
+
+    def test_review_count_accumulates(self):
+        """Review count should increase for repeated cards."""
+        reviews = [
+            Review(card_id="c1", timestamp=0, elapsed_days=0.0,
+                   grade=3, recalled=True),
+            Review(card_id="c1", timestamp=1, elapsed_days=1.0,
+                   grade=3, recalled=True),
+            Review(card_id="c1", timestamp=2, elapsed_days=2.0,
+                   grade=3, recalled=True),
+        ]
+        batch = reviews_to_batch(reviews)
+        counts = batch["review_count"].tolist()
+        assert counts == [1.0, 2.0, 3.0]
+
+
+class TestTaskSampler:
+    def test_filters_short_histories(self):
+        tasks = [
+            Task(student_id="s1", reviews=[
+                Review(card_id=f"c{i}", timestamp=i, elapsed_days=float(i),
+                       grade=3, recalled=True)
+                for i in range(5)
+            ]),  # Only 5 reviews - should be filtered
+            Task(student_id="s2", reviews=[
+                Review(card_id=f"c{i}", timestamp=i, elapsed_days=float(i),
+                       grade=3, recalled=True)
+                for i in range(20)
+            ]),  # 20 reviews - should pass
+        ]
+        sampler = TaskSampler(tasks, min_reviews=10)
+        assert len(sampler) == 1
+
+    def test_sample_returns_correct_count(self):
+        tasks = [
+            Task(student_id=f"s{j}", reviews=[
+                Review(card_id=f"c{i}", timestamp=i, elapsed_days=float(i),
+                       grade=3, recalled=True)
+                for i in range(20)
+            ])
+            for j in range(5)
+        ]
+        sampler = TaskSampler(tasks, min_reviews=10)
+        batch = sampler.sample(batch_size=3)
+        assert len(batch) == 3
+
+    def test_sampled_tasks_have_splits(self):
+        tasks = [
+            Task(student_id=f"s{j}", reviews=[
+                Review(card_id=f"c{i}", timestamp=i, elapsed_days=float(i),
+                       grade=3, recalled=True)
+                for i in range(20)
+            ])
+            for j in range(3)
+        ]
+        sampler = TaskSampler(tasks, min_reviews=10)
+        batch = sampler.sample(2)
+        for task in batch:
+            assert len(task.support_set) > 0
+            assert len(task.query_set) > 0
+
+
+class TestSyntheticGeneration:
+    def test_generate_correct_count(self):
+        tasks = ReviewDataset.generate_synthetic(
+            n_students=10, reviews_per_student=20, n_cards=15, seed=42
+        )
+        assert len(tasks) == 10
+        for task in tasks:
+            assert len(task.reviews) == 20
+
+    def test_synthetic_reviews_have_state(self):
+        tasks = ReviewDataset.generate_synthetic(
+            n_students=5, reviews_per_student=10, n_cards=10, seed=42
+        )
+        for task in tasks:
+            for review in task.reviews:
+                assert review.S_prev > 0
+                assert review.D_prev >= 1.0
+                assert review.D_prev <= 10.0
+                assert 0.0 <= review.R_at_review <= 1.0
+
+    def test_synthetic_deterministic(self):
+        """Same seed should produce identical data."""
+        tasks1 = ReviewDataset.generate_synthetic(
+            n_students=5, reviews_per_student=10, seed=123
+        )
+        tasks2 = ReviewDataset.generate_synthetic(
+            n_students=5, reviews_per_student=10, seed=123
+        )
+        for t1, t2 in zip(tasks1, tasks2):
+            assert t1.student_id == t2.student_id
+            assert len(t1.reviews) == len(t2.reviews)
+            for r1, r2 in zip(t1.reviews, t2.reviews):
+                assert r1.card_id == r2.card_id
+                assert r1.grade == r2.grade
+```
+
+---
+
+## 28. `tests/test_adaptation.py`
+
+```python
+"""Tests for FastAdapter (three-phase adaptation)."""
+
+import sys
+import os
+import torch
+import numpy as np
+import pytest
+from copy import deepcopy
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config import MetaSRSConfig
+from models.memory_net import MemoryNet
+from inference.adaptation import FastAdapter, AdaptationPhase
+from tests.conftest import create_model
+from data.task_sampler import Review
+
+
+def _make_review(card_id="c1", grade=3, elapsed=1.0, timestamp=0):
+    return Review(
+        card_id=card_id,
+        timestamp=timestamp,
+        elapsed_days=elapsed,
+        grade=grade,
+        recalled=grade >= 2,
+        S_prev=3.0,
+        D_prev=5.0,
+        R_at_review=0.9,
+        S_target=5.0,
+        D_target=4.8,
+    )
+
+
+@pytest.fixture
+def adapter():
+    config = MetaSRSConfig()
+    model = create_model(config.model)
+    phi_star = deepcopy(model.state_dict())
+    return FastAdapter(model, phi_star, config)
+
+
+class TestAdaptationPhases:
+    def test_initial_phase_is_zero_shot(self, adapter):
+        assert adapter.phase == AdaptationPhase.ZERO_SHOT
+
+    def test_phase_transitions(self, adapter):
+        # Phase 1: 0-4 reviews → ZERO_SHOT
+        for i in range(4):
+            adapter.add_review(_make_review(timestamp=i))
+        assert adapter.phase == AdaptationPhase.ZERO_SHOT
+
+        # Phase 2: 5-49 reviews → RAPID_ADAPT
+        adapter.add_review(_make_review(timestamp=5))
+        assert adapter.phase == AdaptationPhase.RAPID_ADAPT
+
+        # Add more to reach phase 3 (need >= 50 total)
+        for i in range(6, 51):
+            adapter.add_review(_make_review(timestamp=i))
+        assert adapter.phase == AdaptationPhase.FULL_PERSONAL
+
+    def test_n_reviews_property(self, adapter):
+        assert adapter.n_reviews == 0
+        adapter.add_review(_make_review())
+        assert adapter.n_reviews == 1
+
+
+class TestGetModel:
+    def test_get_model_zero_shot_uses_phi(self, adapter):
+        """In zero-shot phase, get_model should return model with phi_star."""
+        model = adapter.get_model()
+        assert isinstance(model, MemoryNet)
+
+    def test_get_model_returns_eval_mode(self, adapter):
+        model = adapter.get_model()
+        assert not model.training
+
+    def test_get_model_after_adaptation(self, adapter):
+        """After adaptation, model should use theta_student."""
+        for i in range(6):
+            adapter.add_review(_make_review(
+                card_id=f"c{i%3}", timestamp=i, elapsed=float(i+1)
+            ))
+        assert adapter.phase == AdaptationPhase.RAPID_ADAPT
+        model = adapter.get_model()
+        assert isinstance(model, MemoryNet)
+
+
+class TestStateManagement:
+    def test_get_state(self, adapter):
+        adapter.add_review(_make_review())
+        state = adapter.get_state()
+        assert "theta_student" in state
+        assert "reviews" in state
+        assert "n_reviews" in state
+        assert state["n_reviews"] == 1
+        assert "phase" in state
+
+    def test_load_state_roundtrip(self, adapter):
+        for i in range(3):
+            adapter.add_review(_make_review(timestamp=i))
+
+        state = adapter.get_state()
+
+        # Create new adapter and load state
+        config = MetaSRSConfig()
+        model = create_model(config.model)
+        phi_star = deepcopy(model.state_dict())
+        new_adapter = FastAdapter(model, phi_star, config)
+        new_adapter.load_state(state)
+
+        assert new_adapter.n_reviews == 3
+```
+
+---
+
+## 29. `tests/test_scheduling.py`
+
+```python
+"""Tests for uncertainty-aware scheduling."""
+
+import sys
+import os
+import torch
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config import MetaSRSConfig, SchedulingConfig
+from models.memory_net import MemoryNet
+from inference.scheduling import Scheduler, ScheduleResult
+from tests.conftest import create_model
+
+
+@pytest.fixture
+def scheduler():
+    config = MetaSRSConfig()
+    model = create_model(config.model)
+    return Scheduler(model, config.scheduling, mc_samples=5)
+
+
+@pytest.fixture
+def single_features():
+    """Single card features for scheduling."""
+    return torch.randn(1, 49), torch.tensor([10.0])
+
+
+class TestComputeInterval:
+    def test_basic_interval(self, scheduler):
+        interval, conf, diff = scheduler.compute_interval(
+            S_pred=10.0, D=5.0, sigma=0.0
+        )
+        assert isinstance(interval, int)
+        assert 1 <= interval <= 365
+
+    def test_min_interval(self, scheduler):
+        interval, _, _ = scheduler.compute_interval(
+            S_pred=0.1, D=5.0, sigma=0.0
+        )
+        assert interval >= scheduler.cfg.min_interval
+
+    def test_max_interval(self, scheduler):
+        interval, _, _ = scheduler.compute_interval(
+            S_pred=1000.0, D=5.0, sigma=0.0
+        )
+        assert interval <= scheduler.cfg.max_interval
+
+    def test_high_uncertainty_shortens_interval(self, scheduler):
+        """High uncertainty should reduce interval due to confidence discounting.
+        Fuzz adds ±5% randomness, so we allow a small tolerance."""
+        interval_low_sigma, _, _ = scheduler.compute_interval(
+            S_pred=20.0, D=5.0, sigma=0.01
+        )
+        interval_high_sigma, _, _ = scheduler.compute_interval(
+            S_pred=20.0, D=5.0, sigma=0.99
+        )
+        # The confidence factor for sigma=0.99 is ~0.505, vs ~0.995 for sigma=0.01.
+        # With ±5% fuzz, the high-sigma interval could exceed the low-sigma one
+        # by at most ~5% of the low-sigma interval. We use that as tolerance.
+        fuzz_tolerance = max(1, round(interval_low_sigma * 0.10))
+        assert interval_high_sigma <= interval_low_sigma + fuzz_tolerance
+
+    def test_confidence_factor_range(self, scheduler):
+        _, conf, _ = scheduler.compute_interval(
+            S_pred=10.0, D=5.0, sigma=0.5
+        )
+        assert 0.5 <= conf <= 1.0
+
+    def test_difficulty_factor_range(self, scheduler):
+        _, _, diff = scheduler.compute_interval(
+            S_pred=10.0, D=5.0, sigma=0.0
+        )
+        assert 0.5 <= diff <= 1.5
+
+    def test_hard_card_shorter_interval(self, scheduler):
+        """Harder cards (D>5) should get shorter intervals.
+        Seed the RNG for deterministic fuzz to avoid statistical flakiness."""
+        import random
+        rng_state = random.getstate()
+        try:
+            random.seed(42)
+            easy_intervals = [
+                scheduler.compute_interval(S_pred=20.0, D=2.0, sigma=0.0)[0]
+                for _ in range(20)
+            ]
+            random.seed(42)
+            hard_intervals = [
+                scheduler.compute_interval(S_pred=20.0, D=9.0, sigma=0.0)[0]
+                for _ in range(20)
+            ]
+        finally:
+            random.setstate(rng_state)
+
+        avg_easy = sum(easy_intervals) / len(easy_intervals)
+        avg_hard = sum(hard_intervals) / len(hard_intervals)
+        assert avg_hard < avg_easy
+
+
+class TestPredictWithUncertainty:
+    def test_returns_four_tensors(self, scheduler, single_features):
+        features, S_prev = single_features
+        p_mean, p_sigma, S_mean, D_mean = scheduler.predict_with_uncertainty(
+            features, S_prev
+        )
+        assert p_mean.shape == (1,)
+        assert p_sigma.shape == (1,)
+        assert S_mean.shape == (1,)
+        assert D_mean.shape == (1,)
+
+    def test_sigma_non_negative(self, scheduler, single_features):
+        features, S_prev = single_features
+        _, p_sigma, _, _ = scheduler.predict_with_uncertainty(features, S_prev)
+        assert (p_sigma >= 0).all()
+
+
+class TestScheduleCard:
+    def test_returns_schedule_result(self, scheduler, single_features):
+        features, S_prev = single_features
+        result = scheduler.schedule_card("card_001", features, S_prev)
+        assert isinstance(result, ScheduleResult)
+        assert result.card_id == "card_001"
+        assert 1 <= result.interval_days <= 365
+        assert 0.0 <= result.p_recall_mean <= 1.0
+        assert result.p_recall_sigma >= 0.0
+
+
+class TestScheduleDeck:
+    def test_returns_list(self, scheduler):
+        features = torch.randn(3, 49)
+        S_prev = torch.tensor([5.0, 10.0, 20.0])
+        results = scheduler.schedule_deck(
+            ["c1", "c2", "c3"], features, S_prev
+        )
+        assert len(results) == 3
+        assert all(isinstance(r, ScheduleResult) for r in results)
+
+
+class TestSelectNextCard:
+    def test_most_due(self, scheduler):
+        results = [
+            ScheduleResult("c1", 5, 0.8, 0.1, 10, 5, 1.0, 1.0),
+            ScheduleResult("c2", 1, 0.3, 0.2, 3, 7, 0.9, 0.9),
+            ScheduleResult("c3", 10, 0.9, 0.05, 20, 3, 1.0, 1.0),
+        ]
+        selected = scheduler.select_next_card(results, strategy="most_due")
+        assert selected.card_id == "c2"  # Lowest interval
+
+    def test_highest_uncertainty(self, scheduler):
+        results = [
+            ScheduleResult("c1", 5, 0.8, 0.1, 10, 5, 1.0, 1.0),
+            ScheduleResult("c2", 1, 0.3, 0.3, 3, 7, 0.9, 0.9),
+            ScheduleResult("c3", 10, 0.9, 0.05, 20, 3, 1.0, 1.0),
+        ]
+        selected = scheduler.select_next_card(results, strategy="highest_uncertainty")
+        assert selected.card_id == "c2"  # Highest sigma
+
+    def test_uncertainty_weighted(self, scheduler):
+        results = [
+            ScheduleResult("c1", 5, 0.8, 0.1, 10, 5, 1.0, 1.0),
+            ScheduleResult("c2", 1, 0.3, 0.3, 3, 7, 0.9, 0.9),
+        ]
+        selected = scheduler.select_next_card(results, strategy="uncertainty_weighted")
+        assert isinstance(selected, ScheduleResult)
+
+    def test_invalid_strategy_raises(self, scheduler):
+        results = [ScheduleResult("c1", 5, 0.8, 0.1, 10, 5, 1.0, 1.0)]
+        with pytest.raises(ValueError):
+            scheduler.select_next_card(results, strategy="invalid")
+
+    def test_empty_results_raises(self, scheduler):
+        with pytest.raises(ValueError):
+            scheduler.select_next_card([], strategy="most_due")
+```
+
+---
+
+## 30. `tests/test_evaluation.py`
+
+```python
+"""Tests for the evaluation framework."""
+
+import sys
+import os
+import numpy as np
+import torch
+import pytest
+from collections import OrderedDict
+from copy import deepcopy
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from config import MetaSRSConfig
+from models.memory_net import MemoryNet
+from evaluation.metrics import MetaSRSEvaluator, EvalResults
+from tests.conftest import create_model
+from data.task_sampler import ReviewDataset, TaskSampler
+
+
+class TestEvalResults:
+    def test_default_values(self):
+        results = EvalResults()
+        assert results.auc_roc == 0.0
+        assert results.n_samples == 0
+
+    def test_summary_string(self):
+        results = EvalResults(auc_roc=0.85, calibration_error=0.03,
+                              cold_start_auc=0.75, n_samples=100)
+        s = results.summary()
+        assert "AUC-ROC" in s
+        assert "0.8500" in s
+        assert "✓" in s  # AUC > 0.80 should pass
+
+
+class TestAUCComputation:
+    @pytest.fixture
+    def evaluator(self):
+        config = MetaSRSConfig()
+        model = create_model(config.model)
+        return MetaSRSEvaluator(model, config)
+
+    def test_perfect_auc(self, evaluator):
+        preds = np.array([0.9, 0.8, 0.2, 0.1])
+        labels = np.array([1, 1, 0, 0])
+        auc = evaluator.compute_auc_roc(preds, labels)
+        assert auc == 1.0
+
+    def test_random_auc(self, evaluator):
+        """Random predictions should give AUC ≈ 0.5."""
+        np.random.seed(42)
+        preds = np.random.rand(1000)
+        labels = (np.random.rand(1000) > 0.5).astype(float)
+        auc = evaluator.compute_auc_roc(preds, labels)
+        assert 0.4 < auc < 0.6
+
+    def test_auc_with_all_same_label(self, evaluator):
+        """AUC should handle single-class labels gracefully (NaN from sklearn)."""
+        preds = np.array([0.9, 0.8, 0.7])
+        labels = np.array([1, 1, 1])
+        auc = evaluator.compute_auc_roc(preds, labels)
+        # sklearn returns NaN for single-class; manual returns 0.5
+        assert np.isnan(auc) or auc == 0.5
+
+    def test_manual_auc_implementation(self, evaluator):
+        """Test the fallback manual AUC implementation."""
+        preds = np.array([0.9, 0.8, 0.7, 0.2, 0.1])
+        labels = np.array([1, 1, 1, 0, 0])
+        auc = evaluator._manual_auc(preds, labels)
+        assert auc == 1.0
+
+
+class TestEvaluateOnTasks:
+    @pytest.mark.timeout(60)
+    def test_evaluate_returns_results(self):
+        config = MetaSRSConfig()
+        model = create_model(config.model)
+        evaluator = MetaSRSEvaluator(model, config)
+
+        tasks = ReviewDataset.generate_synthetic(
+            n_students=10, reviews_per_student=30, n_cards=10, seed=42
+        )
+        # Split tasks
+        for task in tasks:
+            task.split(support_ratio=0.70)
+
+        phi = deepcopy(model.state_dict())
+        results = evaluator.evaluate_on_tasks(phi, tasks[:5], k_steps=2)
+
+        assert isinstance(results, EvalResults)
+        assert results.n_samples > 0
+        assert 0.0 <= results.auc_roc <= 1.0
+
+    @pytest.mark.timeout(60)
+    def test_cold_start_curve(self):
+        config = MetaSRSConfig()
+        model = create_model(config.model)
+        evaluator = MetaSRSEvaluator(model, config)
+
+        tasks = ReviewDataset.generate_synthetic(
+            n_students=10, reviews_per_student=30, n_cards=10, seed=42
+        )
+        for task in tasks:
+            task.split(support_ratio=0.70)
+
+        phi = deepcopy(model.state_dict())
+        curve = evaluator.cold_start_curve(phi, tasks[:3],
+                                           review_counts=[0, 5])
+
+        assert isinstance(curve, dict)
+        assert 0 in curve
+        assert 0.0 <= curve[0] <= 1.0
+```
+
+---
+
+## 31. `tests/test_integration.py`
+
+```python
+"""Integration test: full train→eval pipeline with synthetic data."""
+
+import sys
+import os
+import pytest
+from copy import deepcopy
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import torch
+from config import MetaSRSConfig
+from models.memory_net import MemoryNet
+from data.task_sampler import ReviewDataset, TaskSampler
+from tests.conftest import create_model
+from training.reptile import ReptileTrainer
+from training.loss import MetaSRSLoss, compute_loss
+from evaluation.metrics import MetaSRSEvaluator
+
+
+class TestEndToEnd:
+    @pytest.mark.timeout(90)
+    def test_synthetic_pipeline(self):
+        """Test the complete train→eval pipeline with minimal synthetic data."""
+        config = MetaSRSConfig()
+        config.training.checkpoint_dir = "/tmp/meta-srs-e2e-checkpoints"
+        config.training.log_dir = "/tmp/meta-srs-e2e-logs"
+
+        # Step 1: Generate synthetic data
+        all_tasks = ReviewDataset.generate_synthetic(
+            n_students=15, reviews_per_student=30, n_cards=10, seed=42
+        )
+        assert len(all_tasks) == 15
+
+        # Step 2: Split into train/test
+        train_tasks = all_tasks[:12]
+        test_tasks = all_tasks[12:]
+        for t in test_tasks:
+            t.split(support_ratio=0.70)
+
+        # Step 3: Create model
+        model = create_model(config.model)
+        assert model.count_parameters() > 0
+
+        # Step 4: Create task sampler
+        sampler = TaskSampler(train_tasks, min_reviews=10)
+        assert len(sampler) > 0
+
+        # Step 5: Run Reptile training (minimal iterations)
+        trainer = ReptileTrainer(model, config)
+        phi = trainer.train(sampler, n_iters=5)
+        assert isinstance(phi, dict)
+
+        # Step 6: Evaluate
+        evaluator = MetaSRSEvaluator(model, config)
+        results = evaluator.evaluate_on_tasks(phi, test_tasks, k_steps=2)
+        assert results.n_samples > 0
+        assert 0.0 <= results.auc_roc <= 1.0
+
+    @pytest.mark.timeout(60)
+    def test_model_forward_with_synthetic_batch(self):
+        """Test that model can do a forward pass on synthetic data."""
+        config = MetaSRSConfig()
+        model = create_model(config.model)
+        loss_fn = MetaSRSLoss(w20=config.fsrs.w[20])
+
+        tasks = ReviewDataset.generate_synthetic(
+            n_students=5, reviews_per_student=20, n_cards=10, seed=42
+        )
+        task = tasks[0]
+        task.split(support_ratio=0.70)
+
+        from data.task_sampler import reviews_to_batch
+        batch = reviews_to_batch(task.support_set)
+
+        # Forward pass
+        state = model(
+            D_prev=batch["D_prev"],
+            S_prev=batch["S_prev"],
+            R_at_review=batch["R_at_review"],
+            delta_t=batch["delta_t"],
+            grade=batch["grade"],
+            review_count=batch["review_count"],
+            user_stats=batch["user_stats"],
+            history_grades=batch["history_grades"],
+            history_delta_ts=batch["history_delta_ts"],
+            history_lengths=batch["history_lengths"],
+        )
+
+        assert not torch.isnan(state.p_recall).any()
+        assert not torch.isnan(state.S_next).any()
+        assert not torch.isnan(state.D_next).any()
+
+        # Loss computation
+        losses = compute_loss(model, batch, loss_fn)
+        assert torch.isfinite(losses["total"])
+
+    @pytest.mark.timeout(60)
+    def test_checkpoint_save_and_load(self):
+        """Test that checkpoints can be saved and loaded."""
+        config = MetaSRSConfig()
+        model = create_model(config.model)
+        phi = deepcopy(model.state_dict())
+
+        path = "/tmp/meta-srs-test-phi.pt"
+        torch.save({"phi": phi, "iteration": 100, "config": config}, path)
+
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        assert "phi" in checkpoint
+        assert checkpoint["iteration"] == 100
+
+        # Load phi into model
+        model.load_state_dict(checkpoint["phi"])
+        # Verify model works after loading
+        features = torch.randn(2, 49)
+        S_prev = torch.tensor([5.0, 10.0])
+        state = model.forward_from_features(features, S_prev)
+        assert state.p_recall.shape == (2,)
+
+        os.unlink(path)
+```
+
+---

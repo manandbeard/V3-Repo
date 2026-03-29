@@ -11,12 +11,10 @@ Key Metrics:
     30-day Retention    Recall rate at 30 days              > 85%
     RMSE (stability)    Error in S estimation               < 2.0 days
 
-Ablation Study Design (5 variants):
+Ablation Study Design (3 variants):
     A: Baseline         — FSRS-6 population params, no adaptation (cold-start)
-    B: Reptile only     — Meta-params, no card content embedding
-    C: Reptile+content  — Card embeddings added, no GRU history encoder
-    D: Full model       — Reptile + content embeddings + GRU history
-    E: Transformer      — Replace GRU with 2-layer Transformer encoder
+    B: Reptile only     — Meta-params, no GRU history encoder
+    C: Full model       — Reptile + GRU history
 """
 
 import torch
@@ -167,7 +165,7 @@ class MetaSRSEvaluator:
             self.model.eval()
 
             query_batch = reviews_to_batch(
-                task.query_set, task.card_embeddings, self.device
+                task.query_set, self.device
             )
 
             with torch.no_grad():
@@ -178,7 +176,6 @@ class MetaSRSEvaluator:
                     delta_t=query_batch["delta_t"],
                     grade=query_batch["grade"],
                     review_count=query_batch["review_count"],
-                    card_embedding_raw=query_batch["card_embedding_raw"],
                     user_stats=query_batch["user_stats"],
                     history_grades=query_batch.get("history_grades"),
                     history_delta_ts=query_batch.get("history_delta_ts"),
@@ -213,7 +210,6 @@ class MetaSRSEvaluator:
                     delta_t=query_batch["delta_t"],
                     grade=query_batch["grade"],
                     review_count=query_batch["review_count"],
-                    card_embedding_raw=query_batch["card_embedding_raw"],
                     user_stats=query_batch["user_stats"],
                     history_grades=query_batch.get("history_grades"),
                     history_delta_ts=query_batch.get("history_delta_ts"),
@@ -292,7 +288,6 @@ class MetaSRSEvaluator:
                 truncated_task = Task(
                     student_id=task.student_id,
                     reviews=task.reviews,
-                    card_embeddings=task.card_embeddings,
                 )
                 truncated_task.support_set = task.support_set[:n_reviews]
                 truncated_task.query_set = task.query_set
@@ -317,7 +312,7 @@ class MetaSRSEvaluator:
 
                 self.model.eval()
                 query_batch = reviews_to_batch(
-                    task.query_set, task.card_embeddings, self.device
+                    task.query_set, self.device
                 )
 
                 with torch.no_grad():
@@ -328,7 +323,6 @@ class MetaSRSEvaluator:
                         delta_t=query_batch["delta_t"],
                         grade=query_batch["grade"],
                         review_count=query_batch["review_count"],
-                        card_embedding_raw=query_batch["card_embedding_raw"],
                         user_stats=query_batch["user_stats"],
                         history_grades=query_batch.get("history_grades"),
                         history_delta_ts=query_batch.get("history_delta_ts"),

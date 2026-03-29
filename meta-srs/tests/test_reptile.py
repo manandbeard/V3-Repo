@@ -29,11 +29,6 @@ def phi_and_model():
 @pytest.fixture
 def simple_task():
     """Create a simple task for testing inner loop."""
-    import numpy as np
-    np.random.seed(42)
-    card_embeddings = {
-        f"c{i}": np.random.randn(384).astype(np.float32) for i in range(5)
-    }
     reviews = [
         Review(card_id=f"c{i%5}", timestamp=i * 86400,
                elapsed_days=float(i), grade=3, recalled=True,
@@ -41,8 +36,7 @@ def simple_task():
                S_target=5.0 + i, D_target=4.8)
         for i in range(30)
     ]
-    task = Task(student_id="test_student", reviews=reviews,
-                card_embeddings=card_embeddings)
+    task = Task(student_id="test_student", reviews=reviews)
     task.split(support_ratio=0.70)
     return task
 
@@ -51,7 +45,7 @@ class TestSampleBatch:
     def test_returns_dict(self, simple_task):
         batch = sample_batch(
             simple_task.support_set, 8,
-            simple_task.card_embeddings, torch.device("cpu")
+            torch.device("cpu")
         )
         assert isinstance(batch, dict)
         assert "D_prev" in batch
@@ -60,7 +54,7 @@ class TestSampleBatch:
     def test_respects_size(self, simple_task):
         batch = sample_batch(
             simple_task.support_set, 5,
-            simple_task.card_embeddings, torch.device("cpu")
+            torch.device("cpu")
         )
         assert batch["D_prev"].shape[0] <= max(5, len(simple_task.support_set))
 

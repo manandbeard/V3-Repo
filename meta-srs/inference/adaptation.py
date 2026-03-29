@@ -21,7 +21,6 @@ Phase 3 — Full personal (50+ reviews):
 
 import torch
 import torch.nn as nn
-import numpy as np
 from copy import deepcopy
 from enum import Enum, auto
 from typing import Dict, List, Optional
@@ -71,7 +70,6 @@ class FastAdapter:
         # Student's personalised parameters
         self.theta_student = deepcopy(phi_star)
         self.reviews: List[Review] = []
-        self.card_embeddings: Dict[str, np.ndarray] = {}
         self._reviews_since_last_adapt = 0
 
         self.loss_fn = MetaSRSLoss(w20=self.fsrs_cfg.w[20])
@@ -144,7 +142,7 @@ class FastAdapter:
 
         # Use all available reviews as training data
         batch = reviews_to_batch(
-            self.reviews, self.card_embeddings, self.device
+            self.reviews, self.device
         )
 
         for step in range(k_steps):
@@ -172,7 +170,7 @@ class FastAdapter:
 
         # Use last few reviews as a mini-batch
         recent = self.reviews[-min(8, len(self.reviews)):]
-        batch = reviews_to_batch(recent, self.card_embeddings, self.device)
+        batch = reviews_to_batch(recent, self.device)
 
         losses = compute_loss(self.model, batch, self.loss_fn)
         loss = losses["total"]

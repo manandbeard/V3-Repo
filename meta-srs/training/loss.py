@@ -125,7 +125,7 @@ def compute_loss(
         model: MemoryNet instance
         batch: Dict from reviews_to_batch() with keys:
             D_prev, S_prev, R_at_review, delta_t, grade,
-            review_count, card_embedding_raw, user_stats, recalled
+            review_count, user_stats, recalled
         loss_fn: MetaSRSLoss instance
 
     Returns:
@@ -138,7 +138,6 @@ def compute_loss(
         delta_t=batch["delta_t"],
         grade=batch["grade"],
         review_count=batch["review_count"],
-        card_embedding_raw=batch["card_embedding_raw"],
         user_stats=batch["user_stats"],
         history_grades=batch.get("history_grades"),
         history_delta_ts=batch.get("history_delta_ts"),

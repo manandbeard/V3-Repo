@@ -70,7 +70,7 @@ class TestEndToEnd:
         task.split(support_ratio=0.70)
 
         from data.task_sampler import reviews_to_batch
-        batch = reviews_to_batch(task.support_set, task.card_embeddings)
+        batch = reviews_to_batch(task.support_set)
 
         # Forward pass
         state = model(
@@ -80,7 +80,6 @@ class TestEndToEnd:
             delta_t=batch["delta_t"],
             grade=batch["grade"],
             review_count=batch["review_count"],
-            card_embedding_raw=batch["card_embedding_raw"],
             user_stats=batch["user_stats"],
             history_grades=batch["history_grades"],
             history_delta_ts=batch["history_delta_ts"],
@@ -112,7 +111,7 @@ class TestEndToEnd:
         # Load phi into model
         model.load_state_dict(checkpoint["phi"])
         # Verify model works after loading
-        features = torch.randn(2, 113)
+        features = torch.randn(2, 49)
         S_prev = torch.tensor([5.0, 10.0])
         state = model.forward_from_features(features, S_prev)
         assert state.p_recall.shape == (2,)

@@ -105,16 +105,16 @@ Input features at each review event:
     R_at_review,         # retrievability when reviewed
     log(Δt + 1),         # time since last review
     grade,               # one-hot: [Again, Hard, Good, Easy]
-    review_count,        # total reviews of this card
-    card_embed,          # BERT/sentence-transformer embedding (dim 64, projected)
-    user_stats,          # aggregate statistics (mean D, mean S, session length)
+    review_count,        # total reviews of this card (log-scaled)
+    user_stats,          # aggregate statistics (mean D, mean S, session length, etc.)
+    gru_context,         # GRU history encoder output (per-card review trajectory)
   ]
-  dim(x) ≈ 64 + 8 + user_stats_dim
+  dim(x) = 4 + 4 + 1 + 8 + 32 = 49
 
 Architecture:
-  h1 = LayerNorm(Linear(x, 128) + GELU)
-  h2 = LayerNorm(Linear(h1, 128) + GELU)
-  h3 = Linear(h2, 64) + GELU
+  h1 = LayerNorm(Linear(49, 128) + GELU)
+  h2 = LayerNorm(Linear(128, 128) + GELU)
+  h3 = Linear(128, 64) + GELU
 
 Heads:
   S_next = Softplus(Linear(h3, 1)) · S_prev   # stability can only grow on success
@@ -129,20 +129,7 @@ Total params: ~50K (fast to adapt, low risk of overfitting on few shots)
 - LayerNorm instead of BatchNorm (works with batch size = 1 for inner-loop SGD)
 - Small footprint so 5–20 gradient steps meaningfully move the parameters
 
-### 2.3 Content-Aware Card Embeddings
-
-Following KAR³L (Shu et al., EMNLP 2024), we embed the card's text content:
-
-```python
-# Offline: embed all cards once
-card_embedding = SentenceTransformer("all-MiniLM-L6-v2").encode(card_front + " | " + card_back)
-# 384-dim → project to 64-dim via trained linear layer
-card_embed = Linear(384, 64)(card_embedding)
-```
-
-This enables **semantic transfer**: if a student knows "France → Paris", their model infers they're likely to know "Germany → Berlin" without a single review, because both cards cluster together in embedding space.
-
-### 2.4 History Encoder (Sequence Context)
+### 2.3 History Encoder (Sequence Context)
 
 To capture the student's recent trajectory (not just per-card state), add a lightweight sequence model:
 
@@ -173,8 +160,7 @@ Task = {
         "timestamp": int,
         "grade": int,          # 1=Again, 2=Hard, 3=Good, 4=Easy
         "elapsed_days": float,
-    }],
-    "card_embeddings": Dict[str, np.ndarray]
+    }]
 }
 ```
 
@@ -336,7 +322,7 @@ For richer modeling, replace the GRU history encoder with a Transformer:
 
 ```
 Input sequence: all of student's cross-card reviews (up to last 128)
-Each token: [card_embed | grade_embed | time_embed | position_embed]
+Each token: [grade_embed | time_embed | position_embed]
 
 Architecture:
   - 2-layer Transformer encoder, 4 heads, dim=128
@@ -365,7 +351,7 @@ This is the principled way to handle uncertainty and exploration simultaneously,
 Layer a policy network on top of the memory model using RL:
 
 ```
-State: [S, D, R, card_embed, time_budget, deck_size, session_progress]
+State: [S, D, R, time_budget, deck_size, session_progress]
 Action: which card to review next (or "end session")
 Reward: Δ(long-term retention) measured at future checkpoints
 
@@ -436,7 +422,6 @@ CREATE TABLE cards (
     front_text    TEXT NOT NULL,
     back_text     TEXT NOT NULL,
     deck_id       UUID,
-    card_embed    BYTEA,               -- pre-computed 64-dim float32 embedding
     domain        VARCHAR(64)          -- vocab, grammar, math, science, etc.
 );
 ```
@@ -458,7 +443,6 @@ Hyperparameters:
   task_batch_size: 32 reviews
   epsilon: 0.1 → 0.01 (linear decay)
   hidden_dim: 128
-  card_embed_dim: 64
   history_len: 32 (GRU) or 128 (Transformer)
 ```
 

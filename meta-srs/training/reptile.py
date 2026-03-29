@@ -42,7 +42,6 @@ from training.loss import MetaSRSLoss, compute_loss
 def sample_batch(
     reviews: list,
     size: int,
-    card_embeddings: dict,
     device: torch.device,
 ) -> Dict[str, torch.Tensor]:
     """Sample a mini-batch of reviews from a support/query set."""
@@ -50,7 +49,7 @@ def sample_batch(
         sampled = reviews
     else:
         sampled = random.sample(reviews, size)
-    return reviews_to_batch(sampled, card_embeddings, device)
+    return reviews_to_batch(sampled, device)
 
 
 def inner_loop(
@@ -87,7 +86,7 @@ def inner_loop(
 
     for step in range(k_steps):
         batch = sample_batch(
-            task.support_set, batch_size, task.card_embeddings, device
+            task.support_set, batch_size, device
         )
         losses = compute_loss(model, batch, loss_fn)
         loss = losses["total"]
@@ -239,7 +238,7 @@ class ReptileTrainer:
                     self.model.eval()
                     with torch.no_grad():
                         query_batch = sample_batch(
-                            task.query_set, 64, task.card_embeddings, self.device
+                            task.query_set, 64, self.device
                         )
                         qloss = compute_loss(self.model, query_batch, self.loss_fn)
                         inner_losses.append(qloss["total"].item())
