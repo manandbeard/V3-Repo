@@ -283,8 +283,8 @@ Implement two schedule methods:
 class AdaptationConfig:
     phase1_threshold: int = 5             # Reviews before first adaptation
     phase2_threshold: int = 50            # Reviews before full personalization
-    phase1_k_steps: int = 5              # Phase 2 gradient steps
-    phase2_k_steps: int = 10             # Phase 2 intermediate steps
+    phase1_k_steps: int = 5              # Gradient steps used in Phase 2 rapid adaptation
+    phase2_k_steps: int = 10             # Gradient steps used in Phase 2 (intermediate)
     phase3_k_steps: int = 20             # Phase 3 gradient steps
     phase3_inner_lr: float = 0.02         # Higher LR for full personalization
     adapt_every_n_reviews: int = 5        # Re-adapt frequency
@@ -354,7 +354,7 @@ Output heads (all from h3's 64-dim output):
 | S_prev | 1 | log(S_prev) — log-scale for numerical stability |
 | R_at_review | 1 | Already in [0, 1] |
 | delta_t (elapsed days) | 1 | log(delta_t + 1) — handles t=0 gracefully |
-| Grade | 4 | One-hot: [Again=1, Hard=2, Good=3, Easy=4] -> (grade-1).clamp(0,3) |
+| Grade | 4 | One-hot encoding: grades 1-4 map to indices 0-3 in a 4-dim vector via `F.one_hot((grade-1).clamp(0,3), num_classes=4)` |
 | Review count | 1 | log(count) — log-scaled |
 | User stats | 8 | Mean difficulty, mean log-stability, plus zeros for other stats |
 | GRU context | 32 | Final hidden state from GRU history encoder |
@@ -548,7 +548,9 @@ class Task:
     query_set: List[Review] = field(default_factory=list)
 
     def split(self, support_ratio=0.70):
-        """CHRONOLOGICAL split — first 70% support, last 30% query. Never random shuffle."""
+        """CHRONOLOGICAL split — first 70% support, last 30% query. Never random shuffle.
+        This temporal ordering is essential: the model must predict future reviews from past history,
+        simulating real-world deployment conditions."""
 ```
 
 ### 7.2 Batch Construction
@@ -593,7 +595,7 @@ class TaskSampler:
 
 For each student, simulate reviews using FSRS-6:
 1. Randomly select a card
-2. If first review: draw grade from weights [15%, 20%, 50%, 15%], use FSRS initial S/D for grade=3 (Good) as defaults
+2. If first review: draw grade from weights [Again=15%, Hard=20%, Good=50%, Easy=15%], use FSRS initial S/D for grade=3 (Good) as defaults
 3. If subsequent review: compute R from forgetting curve, simulate recall with Bernoulli(R), assign grade accordingly (success -> weighted [Hard 20%, Good 60%, Easy 20%], failure -> Again)
 4. Run FSRS step to compute S_next, D_next as targets
 5. Accumulate timestamps (elapsed_days * 86400 seconds)
@@ -789,8 +791,9 @@ def create_model(config=None):
     """Create MemoryNet from ModelConfig, filtering out mc_samples (not a MemoryNet init param)."""
     if config is None:
         config = ModelConfig()
-    init_args = {k: v for k, v in config.__dict__.items()
-                 if k in MemoryNet.__init__.__code__.co_varnames}
+    import inspect
+    valid_params = set(inspect.signature(MemoryNet.__init__).parameters.keys()) - {'self'}
+    init_args = {k: v for k, v in config.__dict__.items() if k in valid_params}
     return MemoryNet(**init_args)
 ```
 
@@ -927,12 +930,12 @@ This should complete in ~4 minutes on CPU and demonstrate the full pipeline.
 |--------|--------|-----------------|
 | AUC-ROC | > 0.80 | ~0.78 |
 | Calibration Error | < 0.05 | ~0.06 |
-| Cold-Start AUC (0 reviews) | > 0.73 | 0.78* |
+| Cold-Start AUC (0 reviews) | > 0.73 | 0.78* (see note) |
 | Adaptation Speed | < 30 reviews | N/A |
 | 30-day Retention | > 85% | ~87% |
 | RMSE(Stability) | < 2.0 days | ~2.5 |
 
-*FSRS-6 uses population parameters directly, so its "cold-start" is already personalized at population level.
+*FSRS-6's "cold-start" number (0.78) is misleading: FSRS-6 uses pre-optimized population parameters, so it's already personalized at the population level. MetaSRS's 0.73 target is for a truly zero-shot neural model that will rapidly surpass FSRS-6 after just 5 reviews.
 
 ---
 
