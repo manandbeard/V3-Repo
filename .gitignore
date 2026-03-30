@@ -12,3 +12,6 @@ logs/
 *.npz
 .env
 .pytest_cache/
+node_modules/
+.upm/
+.config/

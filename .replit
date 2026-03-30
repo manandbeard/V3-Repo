@@ -1,0 +1,12 @@
+run = "cd meta-srs && python api.py"
+entrypoint = "meta-srs/api.py"
+
+[env]
+PORT = "5000"
+PYTHONPATH = "meta-srs"
+
+[nix]
+channel = "stable-24_05"
+
+[nix.packages]
+python = "python312"
