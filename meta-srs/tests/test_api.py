@@ -42,7 +42,8 @@ class TestHealthEndpoint:
     def test_health_model_params_reasonable(self, client):
         resp = client.get("/api/health")
         data = resp.get_json()
-        assert data["model_params"] > 10_000  # ~50K expected
+        # MemoryNet targets ~35-50K params; catch major architectural drift
+        assert 25_000 <= data["model_params"] <= 60_000
 
 
 # ── Submit Review ─────────────────────────────────────────────────────────

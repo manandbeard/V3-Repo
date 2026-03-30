@@ -38,6 +38,10 @@ from inference.scheduling import Scheduler, ScheduleResult
 from data.task_sampler import Review, reviews_to_batch
 from training.fsrs_warmstart import FSRS6
 
+# Grade constant: 3 = "Good" — default grade used when scheduling
+# (scheduling only needs S_prev/D_prev, not a real grade)
+DEFAULT_GRADE = 3
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -110,6 +114,20 @@ def create_app(
             return _adapters[student_id]
 
     # ── Helpers ───────────────────────────────────────────────────────
+
+    def _card_state(adapter: FastAdapter, card_id: str, elapsed_days: float, grade: int = DEFAULT_GRADE):
+        """Look up S_prev, D_prev, R_at_review for a card from student history."""
+        card_history = [r for r in adapter.reviews if r.card_id == card_id]
+        if card_history:
+            last = card_history[-1]
+            S_prev = last.S_target
+            D_prev = last.D_target
+            R_at = fsrs.retrievability(elapsed_days, S_prev) if elapsed_days > 0 else 1.0
+        else:
+            S_prev = fsrs.initial_stability(grade)
+            D_prev = fsrs.initial_difficulty(grade)
+            R_at = 1.0
+        return S_prev, D_prev, R_at
 
     def _schedule_result_to_dict(r: ScheduleResult) -> dict:
         return {
@@ -194,18 +212,9 @@ def create_app(
         adapter = _get_adapter(student_id)
 
         # Compute memory state for this card from student's history
-        card_history = [r for r in adapter.reviews if r.card_id == card_id]
-        if card_history:
-            last = card_history[-1]
-            S_prev = last.S_target
-            D_prev = last.D_target
-            R_at = fsrs.retrievability(elapsed_days, S_prev) if elapsed_days > 0 else 1.0
-        else:
-            # First review of this card for this student
-            S_prev = fsrs.initial_stability(grade)
-            D_prev = fsrs.initial_difficulty(grade)
-            R_at = 1.0
-            elapsed_days = 0.0
+        S_prev, D_prev, R_at = _card_state(adapter, card_id, elapsed_days, grade)
+        if not [r for r in adapter.reviews if r.card_id == card_id]:
+            elapsed_days = 0.0  # First review of this card
 
         # Compute FSRS-6 targets for warm-start consistency
         S_target, D_target, _ = fsrs.step(S_prev, D_prev, elapsed_days, grade)
@@ -287,22 +296,13 @@ def create_app(
             if not cid:
                 continue
 
-            card_history = [r for r in adapter.reviews if r.card_id == cid]
-            if card_history:
-                last = card_history[-1]
-                S_prev = last.S_target
-                D_prev = last.D_target
-            else:
-                S_prev = fsrs.initial_stability(3)  # Default to "Good"
-                D_prev = fsrs.initial_difficulty(3)
-
-            R_at = fsrs.retrievability(elapsed, S_prev) if elapsed > 0 else 1.0
+            S_prev, D_prev, R_at = _card_state(adapter, cid, elapsed)
 
             reviews_for_batch.append(Review(
                 card_id=cid,
                 timestamp=int(time.time()),
                 elapsed_days=elapsed,
-                grade=3,  # Placeholder — scheduling doesn't depend on grade
+                grade=DEFAULT_GRADE,
                 recalled=True,
                 S_prev=S_prev,
                 D_prev=D_prev,
@@ -397,22 +397,13 @@ def create_app(
             if not cid:
                 continue
 
-            card_history = [r for r in adapter.reviews if r.card_id == cid]
-            if card_history:
-                last = card_history[-1]
-                S_prev = last.S_target
-                D_prev = last.D_target
-            else:
-                S_prev = fsrs.initial_stability(3)
-                D_prev = fsrs.initial_difficulty(3)
-
-            R_at = fsrs.retrievability(elapsed, S_prev) if elapsed > 0 else 1.0
+            S_prev, D_prev, R_at = _card_state(adapter, cid, elapsed)
 
             reviews_for_batch.append(Review(
                 card_id=cid,
                 timestamp=int(time.time()),
                 elapsed_days=elapsed,
-                grade=3,
+                grade=DEFAULT_GRADE,
                 recalled=True,
                 S_prev=S_prev,
                 D_prev=D_prev,
